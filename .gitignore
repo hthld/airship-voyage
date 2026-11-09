@@ -1,0 +1,17 @@
+.gradle/
+build/
+out/
+run/
+runs/
+minecraft files/
+logs/
+*.iml
+*.ipr
+*.iws
+.idea/
+.vscode/
+.settings/
+.project
+.classpath
+bin/
+src/generated/resources/.cache/

@@ -1,0 +1,31 @@
+modLoader = "javafml"
+loaderVersion = "[4,)"
+license = "All Rights Reserved"
+
+[[mods]]
+modId = "airshipvoyage"
+version = "0.0.1-proto"
+displayName = "Airship Voyage"
+authors = "pcufkm"
+description = '''
+Realistic rigid airship engineering and flight, 1900-1945.
+Build historical zeppelins from 3D components, fill gas cells, fly, repair and crash.
+'''
+
+# Столкновения с кораблями встроены в движение сущностей (mixin в Entity.collide)
+[[mixins]]
+config = "airshipvoyage.mixins.json"
+
+[[dependencies.airshipvoyage]]
+modId = "neoforge"
+type = "required"
+versionRange = "[21.1.0,)"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.airshipvoyage]]
+modId = "minecraft"
+type = "required"
+versionRange = "[1.21.1,1.22)"
+ordering = "NONE"
+side = "BOTH"

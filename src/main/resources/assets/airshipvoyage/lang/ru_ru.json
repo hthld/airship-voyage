@@ -1,0 +1,19 @@
+{
+  "itemGroup.airshipvoyage": "Airship Voyage",
+  "block.airshipvoyage.blueprint_table": "Стол чертежей дирижаблей",
+  "item.airshipvoyage.truss_section": "Секция фермы",
+  "item.airshipvoyage.ring_segment": "Сегмент главного кольца",
+  "item.airshipvoyage.folded_gas_cell": "Сложенный газовый мешок",
+  "message.airshipvoyage.blueprint_table.wip": "Чертежи пока недоступны (прототип)",
+  "entity.airshipvoyage.airship": "Дирижабль",
+  "commands.airshipvoyage.no_ship": "В радиусе 128 блоков нет дирижабля",
+  "commands.airshipvoyage.unknown_layout": "Неизвестный тип дирижабля",
+  "commands.airshipvoyage.spawned": "Создан %s в точке %s %s %s",
+  "commands.airshipvoyage.removed": "Дирижабль удалён",
+  "commands.airshipvoyage.ok": "Готово",
+  "commands.airshipvoyage.no_cells": "У этого дирижабля нет газовых камер",
+  "commands.airshipvoyage.unknown_cell": "Нет такой газовой камеры",
+  "commands.airshipvoyage.weighoff": "Уравновешен: камеры наполнены на %s%% — корабль висит на этой высоте",
+  "commands.airshipvoyage.weighoff_heavy": "Слишком тяжёл: нужно %s%% наполнения, камеры наполнены полностью",
+  "commands.airshipvoyage.ballast": "Сброшено балласта: %s кг"
+}

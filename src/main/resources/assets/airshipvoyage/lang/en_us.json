@@ -1,0 +1,19 @@
+{
+  "itemGroup.airshipvoyage": "Airship Voyage",
+  "block.airshipvoyage.blueprint_table": "Airship Blueprint Table",
+  "item.airshipvoyage.truss_section": "Truss Section",
+  "item.airshipvoyage.ring_segment": "Main Ring Segment",
+  "item.airshipvoyage.folded_gas_cell": "Folded Gas Cell",
+  "message.airshipvoyage.blueprint_table.wip": "Blueprints are not available yet (prototype)",
+  "entity.airshipvoyage.airship": "Airship",
+  "commands.airshipvoyage.no_ship": "No airship within 128 blocks",
+  "commands.airshipvoyage.unknown_layout": "Unknown airship type",
+  "commands.airshipvoyage.spawned": "Spawned %s at %s %s %s",
+  "commands.airshipvoyage.removed": "Airship removed",
+  "commands.airshipvoyage.ok": "Done",
+  "commands.airshipvoyage.no_cells": "This airship has no gas cells",
+  "commands.airshipvoyage.unknown_cell": "Unknown gas cell",
+  "commands.airshipvoyage.weighoff": "Weighed off: cells filled to %s%% — neutral at this altitude",
+  "commands.airshipvoyage.weighoff_heavy": "Too heavy: needs %s%% fill, cells filled completely",
+  "commands.airshipvoyage.ballast": "Dropped %s kg of ballast"
+}

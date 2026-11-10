@@ -26,7 +26,11 @@ public final class HelmService {
     /** Сколько балласта сбрасывает одно нажатие, кг (поровну из всех мешков). */
     public static final double BALLAST_STEP_KG = 10;
     /** Отклонение рулей с поста при нажатой клавише, градусы. */
-    public static final double RUDDER_DEG = 25, ELEVATOR_DEG = 15;
+    public static final double RUDDER_DEG = 30, ELEVATOR_DEG = 20;
+    /** Насос перекачки балласта нос ↔ корма, кг/с (AV-027): 40 кг — за 8 с. */
+    public static final double TRIM_KG_PER_S = 5.0;
+    /** Шаг сервера, с. */
+    private static final double DT = 0.05;
     /** ID типа детали-поста. */
     public static final String HELM_PART = "helm";
 
@@ -82,12 +86,19 @@ public final class HelmService {
 
     /** Отойти от штурвала (сервер). Рули возвращаются в ноль; телеграф остаётся, как был. */
     public static void leave(Player player, AirshipEntity ship) {
-        if (player.getUUID().equals(ship.helmsman())) {
-            ship.setHelmsman(null);
-            ship.flight().setRudder(0);
-            ship.flight().setElevator(0);
-            ship.flight().setVenting(false);
-        }
+        if (player.getUUID().equals(ship.helmsman())) release(ship);
+    }
+
+    /**
+     * Освободить пост: рули в ноль; клапаны закрываются, только если их открыл пост клавишей V. Клапан, открытый
+     * у штуцера (Shift+ПКМ батареей), пост не трогает.
+     */
+    public static void release(AirshipEntity ship) {
+        ship.setHelmsman(null);
+        ship.flight().setRudder(0);
+        ship.flight().setElevator(0);
+        if (ship.helmVentCommand()) ship.flight().setVenting(false);
+        ship.setHelmVentCommand(false);
     }
 
     /**
@@ -98,6 +109,15 @@ public final class HelmService {
      */
     public static boolean apply(Player player, AirshipEntity ship, int telegraphStep, double rudderDeg, double elevatorDeg,
                                 boolean venting, boolean dropBallast) {
+        return apply(player, ship, telegraphStep, rudderDeg, elevatorDeg, venting, dropBallast, 0);
+    }
+
+    /**
+     * @param trim +1 — нос вверх (вода из носового мешка в кормовой), −1 — нос вниз, 0 — насос стоит; за вызов
+     *             (тик) перекачивается {@value #TRIM_KG_PER_S}·0,05 кг
+     */
+    public static boolean apply(Player player, AirshipEntity ship, int telegraphStep, double rudderDeg, double elevatorDeg,
+                                boolean venting, boolean dropBallast, int trim) {
         if (!player.getUUID().equals(ship.helmsman()) || !nearHelm(player, ship)) return false;
         var flight = ship.flight();
         if (telegraphStep != 0 && !flight.engines().isEmpty()) {
@@ -105,7 +125,20 @@ public final class HelmService {
         }
         flight.setRudder(rudderDeg);
         flight.setElevator(elevatorDeg);
-        flight.setVenting(venting);
+        // клапаны — только при смене команды V: иначе каждый тик «закрыто» с поста перебивало бы
+        // клапан, открытый у штуцера камеры
+        if (venting != ship.helmVentCommand()) {
+            flight.setVenting(venting);
+            ship.setHelmVentCommand(venting);
+        }
+        if (trim != 0) {
+            var bow = flight.endBallast(true);
+            var stern = flight.endBallast(false);
+            if (bow != null && stern != null && bow != stern) {
+                if (trim > 0) flight.transferBallast(bow.id, stern.id, TRIM_KG_PER_S * DT);
+                else flight.transferBallast(stern.id, bow.id, TRIM_KG_PER_S * DT);
+            }
+        }
         if (dropBallast && !flight.ballast().isEmpty()) {
             // поровну: «all» в ядре берёт сначала из первого мешка — с поста это сбивало бы дифферент
             double each = BALLAST_STEP_KG / flight.ballast().size();

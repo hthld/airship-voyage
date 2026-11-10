@@ -8,6 +8,7 @@ import com.airshipvoyage.core.assembly.AssemblyPlans;
 import com.airshipvoyage.core.assembly.ConstructionState;
 import com.airshipvoyage.core.collision.HullCollider;
 import com.airshipvoyage.core.flight.FlightModel;
+import com.airshipvoyage.core.math.Aabb;
 import com.airshipvoyage.core.math.OrientedBox;
 import com.airshipvoyage.core.math.Quat;
 import com.airshipvoyage.core.math.Vec3d;
@@ -159,14 +160,10 @@ public class AirshipEntity extends Entity {
 
     /**
      * Спуск со стапеля (ТЗ 5.4, этап X): проект становится летающим кораблём. Мешки подвешены пустыми —
-     * газ закачивается отдельно (этап IX; пока — командой {@code /airship gas}). Корабль лежит на опорах.
+     * газ можно закачать до спуска (этап IX, ТЗ 7.3). Спуск сохраняет газ и повреждения камер.
      */
     public void launch() {
         if (construction == null) return;
-        for (GasCell cell : flight.cells()) {
-            cell.setAmountMol(0);
-            cell.setLeakPerSecond(0);
-        }
         flight.massChanged();
         flight.place(new Vec3d(getX(), getY(), getZ()), flight.body().orientation());
         setConstruction(null);
@@ -234,6 +231,13 @@ public class AirshipEntity extends Entity {
 
     public java.util.UUID helmsman() { return helmsman; }
 
+    /** Держит ли пост клапаны открытыми клавишей V (сервер, не сохраняется). */
+    private boolean helmVent;
+
+    public boolean helmVentCommand() { return helmVent; }
+
+    public void setHelmVentCommand(boolean open) { helmVent = open; }
+
     public void setHelmsman(java.util.UUID id) {
         helmsman = id;
         entityData.set(DATA_HELM, id == null ? "" : id.toString());
@@ -266,6 +270,11 @@ public class AirshipEntity extends Entity {
         double ballastKg = 0;
         for (FlightModel.Ballast b : flight.ballast()) ballastKg += b.massKg();
         t.putFloat("b", (float) ballastKg);
+        var bow = flight.endBallast(true);
+        var stern = flight.endBallast(false);
+        t.putFloat("bf", bow == null ? 0 : (float) bow.massKg());
+        t.putFloat("ba", stern == null ? 0 : (float) stern.massKg());
+        t.putFloat("pitch", (float) Math.toDegrees(flight.body().orientation().pitchRad()));
         double people = 0;
         for (FlightModel.Payload p : flight.payload()) people += p.massKg();
         t.putFloat("p", (float) people);
@@ -281,7 +290,9 @@ public class AirshipEntity extends Entity {
      * тот добавляет массу в точке своих ступней. Игрок — 80 кг, остальные — по объёму коробки относительно игрока.
      * На сервере игрок кораблями не обрезается (см. ShipCollisions), поэтому опора проверяется здесь напрямую.
      */
-    private void updatePayload() {
+    /** @return есть ли на борту игрок (экипаж — для удержания чанков, ТЗ 22.9) */
+    private boolean updatePayload() {
+        boolean crew = false;
         Vec3d pos = new Vec3d(getX(), getY(), getZ());
         var ship = new HullCollider.Ship(pos, flight.body().orientation(), hullShapes());
         List<FlightModel.Payload> people = new java.util.ArrayList<>();
@@ -292,8 +303,59 @@ public class AirshipEntity extends Entity {
             Vec3d hi = new Vec3d(bb.maxX - 0.05, bb.minY + 0.05, bb.maxZ - 0.05);
             if (!HullCollider.supports(lo, hi, List.of(ship))) continue;
             people.add(new FlightModel.Payload(flight.body().worldToLocal(new Vec3d(e.getX(), e.getY(), e.getZ())), massOf(e)));
+            if (e instanceof net.minecraft.world.entity.player.Player) crew = true;
         }
         flight.setPayload(people);
+        return crew;
+    }
+
+    // ------------------------------------------------------------------ чанки и реестр (ТЗ 22.9, AV-017)
+
+    private final com.airshipvoyage.core.world.ChunkKeeping keeping = new com.airshipvoyage.core.world.ChunkKeeping();
+    private java.util.Set<Long> heldChunks = java.util.Set.of();
+    private int pausedTicks;
+
+    public com.airshipvoyage.core.world.ChunkKeeping chunkKeeping() { return keeping; }
+
+    /** Чанки, которые корабль сейчас держит загруженными (сервер). */
+    public java.util.Set<Long> heldChunks() { return java.util.Collections.unmodifiableSet(heldChunks); }
+
+    /** Сколько тиков подряд физика стоит на паузе: часть корпуса над незагруженным чанком. */
+    public int pausedTicks() { return pausedTicks; }
+
+    private Aabb worldBox() {
+        Vec3d[] b = flight.layout().worldAabb(flight.body().position(), flight.body().orientation());
+        return new Aabb(b[0], b[1]);
+    }
+
+    /** Земля под всем корпусом загружена: иначе контакт считался бы с «пустотой» (ТЗ 22.9). */
+    private boolean footprintLoaded() {
+        for (long k : com.airshipvoyage.core.world.ChunkKeeping.footprint(worldBox(), Vec3d.ZERO, 1.0, 0)) {
+            if (!level().hasChunk(com.airshipvoyage.core.world.ChunkKeeping.chunkX(k), com.airshipvoyage.core.world.ChunkKeeping.chunkZ(k))) return false;
+        }
+        return true;
+    }
+
+    private void updateChunks(boolean crewAboard, int ticks) {
+        if (!(level() instanceof net.minecraft.server.level.ServerLevel sl)) return;
+        boolean hold = keeping.tick(crewAboard, ticks) && construction == null;
+        java.util.Set<Long> want = hold ? com.airshipvoyage.core.world.ChunkKeeping.footprint(worldBox(), flight.body().velocity(),
+                com.airshipvoyage.core.world.ChunkKeeping.MARGIN, com.airshipvoyage.core.world.ChunkKeeping.LOOKAHEAD_S) : java.util.Set.of();
+        if (!want.equals(heldChunks)) heldChunks = com.airshipvoyage.world.ShipChunks.update(sl, getUUID(), heldChunks, want);
+    }
+
+    private void releaseChunks() {
+        if (level() instanceof net.minecraft.server.level.ServerLevel sl && !heldChunks.isEmpty()) {
+            heldChunks = com.airshipvoyage.world.ShipChunks.update(sl, getUUID(), heldChunks, java.util.Set.of());
+        }
+    }
+
+    private void updateRecord() {
+        if (level() instanceof net.minecraft.server.level.ServerLevel sl) {
+            com.airshipvoyage.world.ShipRecords.get(sl).put(new com.airshipvoyage.world.ShipRecords.Entry(getUUID(),
+                    flight.layout().id(), Math.round(getX() * 10) / 10.0, Math.round(getY() * 10) / 10.0,
+                    Math.round(getZ() * 10) / 10.0, sl.getGameTime(), construction != null));
+        }
     }
 
     /** Масса существа на борту, кг: игрок — 80, остальные — пропорционально объёму коробки (игрок 0,6 × 1,8 × 0,6). */
@@ -307,6 +369,15 @@ public class AirshipEntity extends Entity {
     // --- моторы: на сервере — последние отправленные доли мощности, на клиенте — полученные и углы винтов ---
     private float[] engineThrottle = new float[0];
     private float[] propAngle = new float[0], propAngleO = new float[0];
+    /** Отклонение рулей: на сервере — последнее отправленное, на клиенте — цель и показываемое (градусы). */
+    private float rudderShown, elevatorShown, rudderTarget, elevatorTarget;
+    private float rudderShownO, elevatorShownO;
+
+    /** Отклонение руля направления для рендера, градусы (&gt; 0 — влево). */
+    public float rudderForRender(float partialTick) { return rudderShownO + (rudderShown - rudderShownO) * partialTick; }
+
+    /** Отклонение руля высоты для рендера, градусы (&gt; 0 — нос вверх). */
+    public float elevatorForRender(float partialTick) { return elevatorShownO + (elevatorShown - elevatorShownO) * partialTick; }
 
     /** Угол винта мотора {@code index} (по {@code layout().engines()}) для рендера с учётом доли тика. */
     public float propAngle(int index, float partialTick) {
@@ -326,6 +397,10 @@ public class AirshipEntity extends Entity {
         for (int i = 0; i < engines.size(); i++) {
             if (Math.abs(engines.get(i).throttle() - engineThrottle[i]) > 0.01) changed = true;
         }
+        // отклонение рулей — тем же пакетом (видно, как руль ходит, ТЗ 8.5); порог 0,5°
+        if (Math.abs(flight.rudderDeg() - rudderShown) > 0.5 || Math.abs(flight.elevatorDeg() - elevatorShown) > 0.5
+                || (flight.rudderDeg() != rudderShown && flight.rudderDeg() == flight.rudderCommandDeg())
+                || (flight.elevatorDeg() != elevatorShown && flight.elevatorDeg() == flight.elevatorCommandDeg())) changed = true;
         if (!changed) return;
         ListTag list = new ListTag();
         for (int i = 0; i < engines.size(); i++) {
@@ -334,6 +409,10 @@ public class AirshipEntity extends Entity {
         }
         CompoundTag tag = new CompoundTag();
         tag.put("t", list);
+        rudderShown = (float) flight.rudderDeg();
+        elevatorShown = (float) flight.elevatorDeg();
+        tag.putFloat("r", rudderShown);
+        tag.putFloat("e", elevatorShown);
         entityData.set(DATA_ENGINES, tag);
     }
     public boolean[] cellLeakingForRender() { return cellLeaking; }
@@ -434,9 +513,12 @@ public class AirshipEntity extends Entity {
         } else if (DATA_CONSTRUCTION.equals(key)) {
             applyConstructionTag();
         } else if (DATA_ENGINES.equals(key)) {
-            ListTag t = entityData.get(DATA_ENGINES).getList("t", Tag.TAG_FLOAT);
+            CompoundTag et = entityData.get(DATA_ENGINES);
+            ListTag t = et.getList("t", Tag.TAG_FLOAT);
             engineThrottle = new float[t.size()];
             for (int i = 0; i < t.size(); i++) engineThrottle[i] = t.getFloat(i);
+            rudderTarget = et.getFloat("r");
+            elevatorTarget = et.getFloat("e");
         } else if (DATA_CELLS.equals(key)) {
             CompoundTag tag = entityData.get(DATA_CELLS);
             ListTag fills = tag.getList("fill", Tag.TAG_FLOAT), leaks = tag.getList("leak", Tag.TAG_BYTE);
@@ -498,17 +580,27 @@ public class AirshipEntity extends Entity {
 
     private void tickServer() {
         RigidBody body = flight.body();
+        if (tickCount % 100 == 0) updateRecord();
         // На случай, если позицию поменял кто-то извне (/tp, загрузка мира).
         Vec3d entityPos = new Vec3d(getX(), getY(), getZ());
         if (entityPos.distanceTo(body.position()) > 1e-6) body.setPosition(entityPos);
         Quat oldRot = body.orientation();
         if (construction != null) {
             // на стапеле корабль неподвижен: физика полёта не считается (ТЗ 5.4 — спуск только после постройки)
+            flight.tickGas(DT, environment());
+            if (tickCount % 5 == 0) syncCells(false);
             body.freeze();
             setDeltaMovement(net.minecraft.world.phys.Vec3.ZERO);
             return;
         }
 
+        if (!footprintLoaded()) {
+            // часть корпуса над незагруженным чанком: пауза, скорость сохраняется (ТЗ 22.9)
+            pausedTicks++;
+            setDeltaMovement(net.minecraft.world.phys.Vec3.ZERO);
+            return;
+        }
+        pausedTicks = 0;
         try {
             flight.step(DT, environment());
         } catch (IllegalStateException diverged) {
@@ -531,14 +623,11 @@ public class AirshipEntity extends Entity {
         syncOrientation();
         if (tickCount % 5 == 0) syncCells(false);
         syncEngines(false);
-        if (tickCount % 10 == 0) updatePayload();
+        if (tickCount % 10 == 0) updateChunks(updatePayload() || helmsman != null, 10);
         if (helmsman != null) {
             var pilot = level().getPlayerByUUID(helmsman);
             if (pilot == null || !pilot.isAlive() || !com.airshipvoyage.control.HelmService.nearHelm(pilot, this)) {
-                setHelmsman(null);
-                flight.setRudder(0);
-                flight.setElevator(0);
-                flight.setVenting(false);
+                com.airshipvoyage.control.HelmService.release(this);
             } else if (tickCount % 4 == 0) {
                 syncHud();
             }
@@ -548,6 +637,12 @@ public class AirshipEntity extends Entity {
 
     private void tickClient() {
         Vec3d oldPos = new Vec3d(getX(), getY(), getZ());
+        // руль доходит до присланного значения со скоростью рулевой машинки (15°/с = 0,75° за тик)
+        rudderShownO = rudderShown;
+        elevatorShownO = elevatorShown;
+        float step = (float) (FlightModel.SERVO_DEG_PER_S * DT);
+        rudderShown += Math.max(-step, Math.min(step, rudderTarget - rudderShown));
+        elevatorShown += Math.max(-step, Math.min(step, elevatorTarget - elevatorShown));
         Quat oldRot = orientation;
         orientationO = orientation;
         if (propAngle.length != engineThrottle.length) {
@@ -634,12 +729,22 @@ public class AirshipEntity extends Entity {
     public void onAddedToLevel() {
         super.onAddedToLevel();
         ShipRegistry.add(this);
+        updateRecord();
     }
 
     @Override
     public void onRemovedFromLevel() {
         super.onRemovedFromLevel();
         ShipRegistry.remove(this);
+        if (!level().isClientSide) {
+            releaseChunks();
+            RemovalReason why = getRemovalReason();
+            if (why != null && (why.shouldDestroy() || why == RemovalReason.CHANGED_DIMENSION)) {
+                com.airshipvoyage.world.ShipRecords.get((net.minecraft.server.level.ServerLevel) level()).remove(getUUID());
+            } else {
+                updateRecord();
+            }
+        }
         for (var entry : ShipCollisions.contactsOf(this)) ShipCollisions.clearContact(entry.getKey());
     }
 
@@ -744,6 +849,7 @@ public class AirshipEntity extends Entity {
             }
             cell.setAmountMol(c.getDouble("Mol"));
             cell.setLeakPerSecond(c.getDouble("Leak"));
+            cell.setManualValveOpen(c.getBoolean("ManualValve"));
         }
         // балласт — абсолютной массой (аудит 3, AUD-03-02): начальное распределение нового корабля
         // не должно ограничивать восстановление сохранённого
@@ -793,6 +899,7 @@ public class AirshipEntity extends Entity {
             c.putString("Gas", cell.gas().name());
             c.putDouble("Mol", cell.amountMol());
             c.putDouble("Leak", cell.leakPerSecond());
+            c.putBoolean("ManualValve", cell.manualValveOpen());
             cells.add(c);
         }
         tag.put("Cells", cells);

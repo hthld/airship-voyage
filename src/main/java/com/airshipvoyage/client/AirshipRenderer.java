@@ -74,11 +74,18 @@ public class AirshipRenderer extends EntityRenderer<AirshipEntity> {
         PoseStack.Pose last = pose.last();
         for (PartInstance part : ship.visibleParts()) {
             VertexConsumer vc = buffers.getBuffer(RenderType.entityCutout(materialTexture(part.type().material())));
+            var surface = surfaceOf(layout, part.slot());
             for (OrientedBox box : part.hullShapes()) {
-                drawBox(last, vc, box, packedLight, 0xFFFFFFFF);
+                if (surface != null) drawControlSurface(ship, surface, box, partialTick, last, vc, packedLight);
+                else drawBox(last, vc, box, packedLight, 0xFFFFFFFF);
             }
         }
         drawCells(ship, last, buffers, packedLight);
+        // Штуцеры остаются под отсеком даже у пустого мешка: заправка с киля (ТЗ 7.3).
+        for (int i = 0; i < layout.cells().size(); i++) {
+            if (ship.cellPresent(i)) drawBox(last, buffers.getBuffer(RenderType.entityCutout(FALLBACK)),
+                    layout.cells().get(i).fillingPort(), packedLight, 0xFF55CCEE);
+        }
         drawPropellers(ship, partialTick, last, buffers, packedLight);
         if (ship.isUnderConstruction()) drawGhosts(ship, partialTick, last, buffers, packedLight);
         pose.popPose();
@@ -103,6 +110,29 @@ public class AirshipRenderer extends EntityRenderer<AirshipEntity> {
                 drawBox(pose, vc, new OrientedBox(hub, new Vec3d(0.04, 0.85, 0.08), spin), light, 0xFFFFFFFF);
             }
         }
+    }
+
+    private static com.airshipvoyage.core.structure.ControlSurface surfaceOf(ShipLayout layout, String slot) {
+        for (var s : layout.controlSurfaces()) if (s.slot().equals(slot)) return s;
+        return null;
+    }
+
+    /**
+     * Стабилизатор с рулём (ТЗ 8.5): передняя половина неподвижна, задняя (руль) поворачивается на шарнире
+     * посередине хорды. Положительная команда давит стабилизатор по нормали — значит, задняя кромка руля уходит
+     * в обратную сторону: поворот вокруг оси x̂ × n на угол отклонения.
+     */
+    private void drawControlSurface(AirshipEntity ship, com.airshipvoyage.core.structure.ControlSurface s, OrientedBox box,
+                                    float partialTick, PoseStack.Pose pose, VertexConsumer vc, int light) {
+        Vec3d c = box.center(), h = box.halfExtents();
+        double half = h.x() / 2;
+        drawBox(pose, vc, new OrientedBox(c.add(new Vec3d(half, 0, 0)), new Vec3d(half, h.y(), h.z()), box.rotation()), light, 0xFFFFFFFF);
+        double deg = s.kind() == com.airshipvoyage.core.structure.ControlSurface.Kind.RUDDER
+                ? ship.rudderForRender(partialTick) : ship.elevatorForRender(partialTick);
+        Quat turn = Quat.fromAxisAngle(Vec3d.UNIT_X.cross(s.normal()), Math.toRadians(deg));
+        Vec3d centre = c.add(turn.rotate(new Vec3d(-half, 0, 0)));
+        // руль чуть светлее и чуть тоньше — шарнир виден
+        drawBox(pose, vc, new OrientedBox(centre, new Vec3d(half * 0.98, h.y() * 0.96, h.z() * 0.9), turn), light, 0xFFE8DCC0);
     }
 
     private ResourceLocation materialTexture(String material) {

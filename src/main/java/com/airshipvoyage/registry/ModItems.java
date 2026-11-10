@@ -13,6 +13,13 @@ import net.neoforged.neoforge.registries.DeferredRegister;
 public final class ModItems {
     public static final DeferredRegister.Items ITEMS = DeferredRegister.createItems(AirshipVoyage.MOD_ID);
 
+    public static final DeferredItem<com.airshipvoyage.gas.GasSupplyItem> HYDROGEN_SUPPLY = ITEMS.registerItem(
+            "hydrogen_supply", p -> new com.airshipvoyage.gas.GasSupplyItem(
+                    com.airshipvoyage.core.physics.LiftingGas.HYDROGEN, p), new Item.Properties().stacksTo(1));
+    public static final DeferredItem<com.airshipvoyage.gas.GasSupplyItem> HELIUM_SUPPLY = ITEMS.registerItem(
+            "helium_supply", p -> new com.airshipvoyage.gas.GasSupplyItem(
+                    com.airshipvoyage.core.physics.LiftingGas.HELIUM, p), new Item.Properties().stacksTo(1));
+
     public static final DeferredItem<BlockItem> BLUEPRINT_TABLE =
             ITEMS.registerSimpleBlockItem("blueprint_table", ModBlocks.BLUEPRINT_TABLE);
 

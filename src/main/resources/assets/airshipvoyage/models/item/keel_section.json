@@ -1,4 +1,6 @@
 {
   "parent": "minecraft:item/generated",
-  "textures": { "layer0": "minecraft:block/iron_trapdoor" }
+  "textures": {
+    "layer0": "airshipvoyage:item/keel_section"
+  }
 }

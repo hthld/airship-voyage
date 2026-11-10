@@ -40,17 +40,21 @@ public final class AirshipNetwork {
         @Override public Type<LeaveHelm> type() { return TYPE; }
     }
 
-    /** Команды с поста за тик: ступень телеграфа (±1), рули, газ, сброс балласта. */
-    public record HelmInput(int ship, int telegraphStep, float rudder, float elevator, boolean vent, boolean dropBallast)
+    /**
+     * Команды с поста за тик: ступень телеграфа (±1), рули и флаги: {@link #VENT} газ, {@link #DROP} сброс балласта,
+     * {@link #TRIM_UP} / {@link #TRIM_DOWN} перекачка балласта (нос вверх / вниз).
+     */
+    public record HelmInput(int ship, int telegraphStep, float rudder, float elevator, int flags)
             implements CustomPacketPayload {
+        public static final int VENT = 1, DROP = 2, TRIM_UP = 4, TRIM_DOWN = 8;
+        public boolean has(int flag) { return (flags & flag) != 0; }
         public static final Type<HelmInput> TYPE = new Type<>(id("helm_input"));
         public static final StreamCodec<ByteBuf, HelmInput> CODEC = StreamCodec.composite(
                 ByteBufCodecs.VAR_INT, HelmInput::ship,
                 ByteBufCodecs.VAR_INT, HelmInput::telegraphStep,
                 ByteBufCodecs.FLOAT, HelmInput::rudder,
                 ByteBufCodecs.FLOAT, HelmInput::elevator,
-                ByteBufCodecs.BOOL, HelmInput::vent,
-                ByteBufCodecs.BOOL, HelmInput::dropBallast,
+                ByteBufCodecs.VAR_INT, HelmInput::flags,
                 HelmInput::new);
         @Override public Type<HelmInput> type() { return TYPE; }
     }
@@ -84,7 +88,9 @@ public final class AirshipNetwork {
     private static void onInput(HelmInput p, IPayloadContext ctx) {
         AirshipEntity ship = ship(ctx, p.ship());
         if (ship == null) return;
-        HelmService.apply(ctx.player(), ship, Integer.signum(p.telegraphStep()), p.rudder(), p.elevator(), p.vent(), p.dropBallast());
+        int trim = (p.has(HelmInput.TRIM_UP) ? 1 : 0) - (p.has(HelmInput.TRIM_DOWN) ? 1 : 0);
+        HelmService.apply(ctx.player(), ship, Integer.signum(p.telegraphStep()), p.rudder(), p.elevator(),
+                p.has(HelmInput.VENT), p.has(HelmInput.DROP), trim);
     }
 
     private AirshipNetwork() {}

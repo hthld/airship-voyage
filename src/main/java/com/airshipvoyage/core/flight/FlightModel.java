@@ -225,7 +225,7 @@ public final class FlightModel {
     }
 
     public boolean venting() {
-        return !cells.isEmpty() && cells.get(0).manualValveOpen();
+        return cells.stream().anyMatch(GasCell::manualValveOpen);
     }
 
     /** Пересобрать массу, если она заметно изменилась (утечка, сброс балласта, наполнение). */
@@ -240,15 +240,24 @@ public final class FlightModel {
     // ------------------------------------------------------------------ шаг
 
     public StepReport step(double dt, Environment env) {
+        tickGas(dt, env);
+        for (Engine e : engines) e.tick(dt);
+        rudderDeg = servo(rudderDeg, rudderCmdDeg, dt);
+        elevatorDeg = servo(elevatorDeg, elevatorCmdDeg, dt);
+
+        return stepBody(dt, env);
+    }
+
+    /** Газ живёт и на стапеле: наполнение, клапаны, утечки (ТЗ 5.4, этап IX; 7.3). */
+    public void tickGas(double dt, Environment env) {
         // газ: утечки, клапаны, перегрев — раз за тик
         for (int i = 0; i < cells.size(); i++) {
             cells.get(i).tick(dt, airAtLocal(layout.cells().get(i).bay().center(), env));
         }
         refreshMass(false);
-        for (Engine e : engines) e.tick(dt);
-        rudderDeg = servo(rudderDeg, rudderCmdDeg, dt);
-        elevatorDeg = servo(elevatorDeg, elevatorCmdDeg, dt);
+    }
 
+    private StepReport stepBody(double dt, Environment env) {
         Vec3d[] box = layout.worldAabb(body.position(), body.orientation());
         Aabb bounds = new Aabb(box[0], box[1]).inflate(0.5, 0.5, 0.5);
         // снимок блоков на весь тик: габарит плюс путь, который корпус может пройти за тик (с вращением)
@@ -296,19 +305,33 @@ public final class FlightModel {
         }
         Vec3d pos = body.position();
         double rho = env.atmosphere().at(env.altitudeMeters(pos.y())).densityKgM3();
-        drag.apply(body, env.wind(pos), rho);
+        drag.apply(body, env.wind(pos), rho, dragCenterLocal());
         applyThrust(env, rho);
         applySurfaces(env, rho);
+    }
+
+    /**
+     * Точка приложения сопротивления корпуса: середина габарита по длине и ширине (ось корпуса), по высоте — на
+     * уровне ЦМ. Высота оставлена у ЦМ: дифферент от сопротивления выше ЦМ уже учтён выбором высоты тяги (D-114),
+     * а по горизонтали сила должна оставаться на оси корпуса, когда груз сдвигает ЦМ (D-133).
+     */
+    private Vec3d dragCenterLocal() {
+        Vec3d lo = layout.localBoundsMin(), hi = layout.localBoundsMax();
+        return new Vec3d((lo.x() + hi.x()) / 2, body.massProperties().centerOfMass().y(), (lo.z() + hi.z()) / 2);
     }
 
     // ------------------------------------------------------------------ оперение и рули (ТЗ 8.5)
 
     /** Наклон кривой подъёмной силы стабилизатора малого удлинения (λ ≈ 1,5–2), 1/рад. */
     public static final double FIN_LIFT_SLOPE = 2.3;
-    /** Доля руля в площади стабилизатора: отклонение руля на δ меняет угол обтекания всей плоскости на τ·δ. */
-    public static final double RUDDER_EFFECTIVENESS = 0.5;
-    /** Предельное отклонение рулей, градусы. */
-    public static final double MAX_DEFLECTION_DEG = 25;
+    /**
+     * Эффективность руля τ: отклонение на δ меняет угол обтекания всей плоскости на τ·δ. Руль — половина хорды
+     * стабилизатора; теория тонкого профиля для закрылка в 50 % хорды даёт τ ≈ 0,69 (было 0,5 — грубая «доля
+     * площади»; поворот был в 2,3 раза медленнее исторического, жалоба владельца, D-132).
+     */
+    public static final double RUDDER_EFFECTIVENESS = 0.7;
+    /** Предельное отклонение рулей, градусы (у цеппелинов — около 30°). */
+    public static final double MAX_DEFLECTION_DEG = 30;
     /** Скорость перекладки рулей (штурвальный привод), градусов в секунду. */
     public static final double SERVO_DEG_PER_S = 15;
     /** Срыв потока: дальше этого угла сила не растёт, рад (≈ 20°). */
@@ -572,6 +595,15 @@ public final class FlightModel {
 
     // ------------------------------------------------------------------ управление газом и балластом
 
+    /** Заправка с конечным запасом: воздух берётся на высоте именно этой камеры (ТЗ 7.3–7.4). */
+    public com.airshipvoyage.core.physics.GasFilling.Result supplyGas(int cellIndex, LiftingGas gas,
+            double availableMol, double dt, Environment env) {
+        var result = com.airshipvoyage.core.physics.GasFilling.transfer(cells.get(cellIndex), gas, availableMol, dt,
+                airAtLocal(layout.cells().get(cellIndex).bay().center(), env));
+        if (result.transferredMol() > 0) refreshMass(true);
+        return result;
+    }
+
     /** Наполнить камеру до доли {@code fraction} её объёма при текущих условиях. */
     public void setFill(int cellIndex, double fraction, Environment env) {
         GasCell cell = cells.get(cellIndex);
@@ -625,6 +657,36 @@ public final class FlightModel {
         double v = Double.isFinite(kg) ? Math.max(0, Math.min(MAX_BALLAST_PER_BAG_KG, kg)) : 0;
         for (Ballast b : ballast) if (b.id.equals(id)) b.massKg = v;
         refreshMass(true);
+    }
+
+    /**
+     * Перекачать до {@code kg} водяного балласта из мешка {@code from} в мешок {@code to} (ТЗ 8.3, AV-027):
+     * общая масса не меняется, сдвигается центр масс — так дифферентуют корабль. Ограничено водой в исходном
+     * мешке и местом в приёмном ({@value #MAX_BALLAST_PER_BAG_KG} кг).
+     * @return перекачано, кг
+     */
+    public double transferBallast(String from, String to, double kg) {
+        Ballast src = null, dst = null;
+        for (Ballast b : ballast) {
+            if (b.id.equals(from)) src = b;
+            if (b.id.equals(to)) dst = b;
+        }
+        if (src == null || dst == null || src == dst || !(kg > 0)) return 0;
+        double moved = Math.min(kg, Math.min(src.massKg, MAX_BALLAST_PER_BAG_KG - dst.massKg));
+        if (moved <= 0) return 0;
+        src.massKg -= moved;
+        dst.massKg += moved;
+        refreshMass(true);
+        return moved;
+    }
+
+    /** Мешок балласта ближе всего к носу (наибольший x) или к корме; null — балласта нет. */
+    public Ballast endBallast(boolean bow) {
+        Ballast best = null;
+        for (Ballast b : ballast) {
+            if (best == null || (bow ? b.local.x() > best.local.x() : b.local.x() < best.local.x())) best = b;
+        }
+        return best;
     }
 
     /** Сбросить до {@code kg} балласта из мешка {@code id} (или из всех по порядку, если id = "all"). @return сброшено, кг */

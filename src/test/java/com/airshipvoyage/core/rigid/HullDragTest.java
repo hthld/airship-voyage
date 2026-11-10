@@ -33,7 +33,7 @@ class HullDragTest {
 
     /**
      * Поперечная сила корпуса на ходу: скорость (5; 0; 1) — к квадратичному сопротивлению бортом
-     * ½·1,225·(1·20·4)·1² = 49 Н добавляется ½·1,225·(0,5·80)·5·1 = 122,5 Н; на месте (u = 0) — только 49 Н.
+     * ½·1,225·(1·20·4)·1² = 49 Н добавляется ½·1,225·(1,0·80)·5·1 = 245 Н (наклон 1,0, D-132); на месте (u = 0) — только 49 Н.
      */
     @Test
     void crossflowLiftAppearsOnlyUnderWay() {
@@ -44,7 +44,7 @@ class HullDragTest {
         drag.apply(still, Vec3d.ZERO, 1.225);
         moving.step(1.0);
         still.step(1.0);
-        assertEquals((49 + 122.5) / 2000, 1 - moving.velocity().z(), 1e-9);
+        assertEquals((49 + 245) / 2000.0, 1 - moving.velocity().z(), 1e-9);
         assertEquals(49.0 / 2000, 1 - still.velocity().z(), 1e-9);
     }
 

@@ -835,6 +835,13 @@ public final class AirshipGameTests {
                 flight.engines().get(0).telegraph(), flight.rudderCommandDeg(), flight.elevatorCommandDeg(), fwd, aft);
         h.assertTrue(Math.abs(fwd - 102.5) < 1e-9 && Math.abs(aft - 87.5) < 1e-9, "ballast " + fwd + " / " + aft);
 
+        // AV-027: насос перекачки 5 кг/с — 40 тиков «нос вверх» = 10 кг из носового в кормовой
+        double total = fwd + aft;
+        for (int i = 0; i < 40; i++) com.airshipvoyage.control.HelmService.apply(pilot, ship, 0, 0, 0, false, false, 1);
+        double fwd2 = flight.ballast().get(0).massKg(), aft2 = flight.ballast().get(1).massKg();
+        h.assertTrue(Math.abs(fwd2 - (fwd - 10)) < 1e-6 && Math.abs(aft2 - (aft + 10)) < 1e-6 && Math.abs(fwd2 + aft2 - total) < 1e-9,
+                "trim pump: " + fwd2 + " / " + aft2);
+
         com.airshipvoyage.control.HelmService.leave(pilot, ship);
         h.assertTrue(ship.helmsman() == null, "still at the helm");
         h.assertTrue(flight.rudderCommandDeg() == 0 && flight.elevatorCommandDeg() == 0 && !flight.venting(), "controls not reset");
@@ -887,6 +894,94 @@ public final class AirshipGameTests {
                     ship.discard();
                     h.succeed();
                 })));
+    }
+
+    /**
+     * Ревью Claude кода Codex: клапан, открытый у штуцера (Shift+ПКМ батареей), не должен закрываться постом.
+     * Раньше пост каждый тик присылал «клапаны закрыты» и перебивал его. Клавиша V у штурвала по-прежнему
+     * открывает и закрывает все клапаны.
+     */
+    @GameTest(template = DOCK, batch = "helm")
+    public static void helmDoesNotOverrideCellValveOpenedAtPort(GameTestHelper h) {
+        AirshipEntity ship = spawnFlyingShip(h, 12);
+        var flight = ship.flight();
+        var pilot = playerAtLocal(h, ship, 8.2, PrototypeShip.DECK_TOP, 0);
+        h.assertTrue(com.airshipvoyage.control.HelmService.take(pilot, ship) == com.airshipvoyage.control.HelmService.Result.TAKEN, "take");
+        flight.cells().get(1).setManualValveOpen(true); // открыто у штуцера кормовой камеры
+        for (int i = 0; i < 5; i++) com.airshipvoyage.control.HelmService.apply(pilot, ship, 0, 0, 0, false, false);
+        h.assertTrue(flight.cells().get(1).manualValveOpen(), "helm closed the valve opened at the port");
+        com.airshipvoyage.control.HelmService.apply(pilot, ship, 0, 0, 0, true, false);
+        h.assertTrue(flight.cells().stream().allMatch(c -> c.manualValveOpen()), "V did not open all valves");
+        com.airshipvoyage.control.HelmService.apply(pilot, ship, 0, 0, 0, false, false);
+        h.assertTrue(flight.cells().stream().noneMatch(c -> c.manualValveOpen()), "releasing V did not close valves");
+        flight.cells().get(0).setManualValveOpen(true);
+        com.airshipvoyage.control.HelmService.leave(pilot, ship);
+        h.assertTrue(flight.cells().get(0).manualValveOpen(), "leaving the helm closed the port valve");
+        ship.discard();
+        h.succeed();
+    }
+
+    // ------------------------------------------------------------------ AV-017: чанки и реестр (ТЗ 22.9)
+
+    /** Чанки, принудительно загруженные тикетами сущностей (по данным мира, а не по самому кораблю). */
+    private static java.util.Set<Long> forcedEntityChunks(GameTestHelper h) {
+        var data = h.getLevel().getDataStorage().get(net.minecraft.world.level.ForcedChunksSavedData.factory(), "chunks");
+        java.util.Set<Long> out = new java.util.HashSet<>();
+        if (data != null) data.getEntityForcedChunks().getTickingChunks().values().forEach(out::addAll);
+        return out;
+    }
+
+    /**
+     * ТЗ 22.9: без экипажа корабль чанков не держит (после загрузки мира — тоже). Экипаж на борту — держит все
+     * чанки под корпусом с запасом 2 м (проверка — по углам габарита, в хранилище тикетов мира). Удалили
+     * корабль — тикеты сняты, запись из реестра убрана. Реестр ведётся с момента появления корабля.
+     */
+    @GameTest(template = DOCK, timeoutTicks = 200, batch = "chunks")
+    public static void crewMakesShipHoldItsChunksAndRemovalReleasesThem(GameTestHelper h) {
+        AirshipEntity ship = spawnFlyingShip(h, 12);
+        var records = com.airshipvoyage.world.ShipRecords.get(h.getLevel());
+        var rec = records.entry(ship.getUUID());
+        h.assertTrue(rec != null && PrototypeShip.LAYOUT_ID.equals(rec.layout()) && Math.abs(rec.x() - ship.getX()) < 0.1,
+                "ship not in the registry: " + rec);
+        onShipTicks(h, ship, new java.util.TreeMap<>(java.util.Map.of(
+                11, () -> {
+                    h.assertTrue(ship.heldChunks().isEmpty(), "no crew, but holds " + ship.heldChunks());
+                    ship.chunkKeeping().crewSeen();
+                },
+                21, () -> {
+                    var held = ship.heldChunks();
+                    Vec3d[] box = ship.flight().layout().worldAabb(ship.body().position(), ship.body().orientation());
+                    for (double x : new double[]{box[0].x() - 2, box[1].x() + 2}) {
+                        for (double z : new double[]{box[0].z() - 2, box[1].z() + 2}) {
+                            long k = com.airshipvoyage.core.world.ChunkKeeping.key(Math.floorDiv((int) Math.floor(x), 16),
+                                    Math.floorDiv((int) Math.floor(z), 16));
+                            h.assertTrue(held.contains(k), "corner chunk not held: " + x + ", " + z);
+                        }
+                    }
+                    var forced = forcedEntityChunks(h);
+                    h.assertTrue(forced.containsAll(held), "tickets not in the world: held " + held + ", forced " + forced);
+                    AirshipVoyage.LOGGER.info("[test] crew aboard: ship holds {} chunks, world has {} forced by entities",
+                            held.size(), forced.size());
+                    CommandSourceStack src = h.getLevel().getServer().createCommandSourceStack()
+                            .withLevel(h.getLevel()).withPermission(4).withSuppressedOutput();
+                    int listed = h.getLevel().getServer().getCommands().getDispatcher().parse("airship list", src).getContext()
+                            .build("airship list").getCommand() == null ? 0 : 1;
+                    h.assertTrue(listed == 1, "no /airship list");
+                    java.util.Set<Long> before = new java.util.HashSet<>(held);
+                    ship.discard();
+                    h.runAfterDelay(1, () -> {
+                        var after = forcedEntityChunks(h);
+                        for (long k : before) h.assertTrue(!after.contains(k) || forcedByOthers(h, k), "ticket left after removal: " + k);
+                        h.assertTrue(records.entry(ship.getUUID()) == null, "removed ship still in the registry");
+                        h.succeed();
+                    });
+                })));
+    }
+
+    /** Другие корабли этого же прогона тестов экипажа не имеют — их тикетов нет; оставлено на случай будущих тестов. */
+    private static boolean forcedByOthers(GameTestHelper h, long k) {
+        for (AirshipEntity s : com.airshipvoyage.collision.ShipRegistry.ships(h.getLevel())) if (s.heldChunks().contains(k)) return true;
+        return false;
     }
 
     /** AV-012: команды рулей — через `/airship rudder` и `/airship elevator`; сохраняются в мире. */

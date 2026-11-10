@@ -1,8 +1,8 @@
 {
   "parent": "minecraft:block/cube_bottom_top",
   "textures": {
-    "top": "minecraft:block/cartography_table_top",
+    "top": "airshipvoyage:block/blueprint_table_top",
     "bottom": "minecraft:block/dark_oak_planks",
-    "side": "minecraft:block/cartography_table_side3"
+    "side": "airshipvoyage:block/blueprint_table_side"
   }
 }

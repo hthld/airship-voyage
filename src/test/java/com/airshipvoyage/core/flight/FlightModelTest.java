@@ -353,11 +353,11 @@ class FlightModelTest {
     void ruddersMoveAtServoRate() {
         FlightModel m = trimmedShip();
         m.setRudder(40);
-        assertEquals(25, m.rudderCommandDeg(), 0);
+        assertEquals(30, m.rudderCommandDeg(), 0);
         run(m, env(null), 1);
         assertEquals(15, m.rudderDeg(), 1e-9);
-        run(m, env(null), 1);
-        assertEquals(25, m.rudderDeg(), 1e-9);
+        run(m, env(null), 1.5);
+        assertEquals(30, m.rudderDeg(), 1e-9);
     }
 
     /** ТЗ 8.5: без воздушной скорости рули не действуют — корабль на месте не поворачивает и не меняет дифферент. */
@@ -376,25 +376,33 @@ class FlightModelTest {
      * (отдельным расчётом, не кодом модели): боковые силы дают центростремительную m_бок·V·ω (m_бок = 1704 + 1744 кг
      * присоединённой массы), момент руля на плече 8,5 м — демпфирование решётки 38 945·ω². Сила руля
      * ½·ρ·V²·6·2,3·(τ·δ − α_хвоста), α_хвоста = atan((v_бок + 8,5·ω)/V); сила корпуса — квадратичное сопротивление
-     * бортом (C·S = 236 м²) плюс поперечная сила 98,4·|u|·v_бок. При V = 5,6 м/с: ω = 0,0241 рад/с, скольжение 9,9°.
-     * Без поперечной силы корпуса было бы 0,008 — найдено этим тестом.
+     * бортом (C·S = 236 м²) плюс поперечная сила C·196,8·|u|·v_бок. Без поперечной силы корпуса было бы 0,008 —
+     * найдено этим тестом.
+     *
+     * <p>Было (τ = 0,5, δ = 25°, C = 0,5): ω = 0,0241 рад/с, радиус ≈ 230 м — владелец: «слабо поворачивает».
+     * Стало (D-132: τ = 0,7, δ = 30°, C = 1,0; масса 1736 кг с постом): тот же расчёт при V = 5,533 м/с (скорость
+     * в вираже из модели) — ω = 0,0565 рад/с (3,24°/с), скольжение 13,1°, радиус 98 м ≈ 4,8 длины корпуса;
+     * модель — 0,0559.
      */
+    static final double EXPECTED_TURN = 0.0565;
+
     @Test
     void rudderTurnsShipUnderWay() {
         FlightModel m = trimmedShip();
         m.setTelegraph("all", com.airshipvoyage.core.propulsion.Telegraph.FULL);
         run(m, env(null), 30);
         assertEquals(0, m.body().angularVelocity().y(), 1e-6, "straight before the rudder");
-        m.setRudder(25);
+        m.setRudder(30);
         run(m, env(null), 40);
         double w = m.body().angularVelocity().y();
-        assertEquals(0.0241, w, 0.002, "steady turn rate");
+        System.out.printf("[turn] w %.4f rad/s, V %.3f m/s%n", w, m.body().velocity().length());
+        assertEquals(EXPECTED_TURN, w, 0.002, "steady turn rate");
         assertTrue(Math.toDegrees(m.body().orientation().yawRad()) > 30, "turned to port");
         // руль вправо — в другую сторону
         FlightModel r = trimmedShip();
         r.setTelegraph("all", com.airshipvoyage.core.propulsion.Telegraph.FULL);
         run(r, env(null), 30);
-        r.setRudder(-25);
+        r.setRudder(-30);
         run(r, env(null), 40);
         assertEquals(-w, r.body().angularVelocity().y(), 1e-3);
     }
@@ -412,6 +420,67 @@ class FlightModelTest {
         run(m, env(null), 40);
         // флюгер возвращает с забросом (на 20-й секунде −0,008 рад/с), к 40-й колебание затухло
         assertEquals(0, m.body().angularVelocity().y(), 0.003, "yaw rate after 40 s");
+    }
+
+    /**
+     * Жалоба владельца: «при полёте дирижабль уже тянет в сторону». Человек 80 кг стоит на настиле в 1 м от оси
+     * (над ЦМ по длине), корабль уравновешен с ним; полный ход, руль 0. ЦМ уходит вбок на 80·1/1816 ≈ 4,4 см.
+     * Раньше сопротивление корпуса прикладывалось в ЦМ, а тяга — у гондол на ±6,5 м: плечи 6,544 и 6,456 м,
+     * разность ×1500 Н ≈ 130 Н·м — корабль сам разворачивался на −19° за минуту. Сопротивление действует на корпус:
+     * теперь — на оси корпуса, курс держится (крен ≈ 1° остаётся — он настоящий).
+     */
+    @Test
+    void personOffCentreDoesNotPullShipAside() {
+        FlightModel m = ship(0);
+        m.setPayload(List.of(new FlightModel.Payload(new Vec3d(0, PrototypeShip.DECK_TOP, 1.0), 80)));
+        m.weighOff(env(null));
+        m.setTelegraph("all", com.airshipvoyage.core.propulsion.Telegraph.FULL);
+        run(m, env(null), 60);
+        double yaw = Math.toDegrees(m.body().orientation().yawRad());
+        double roll = Math.toDegrees(m.body().orientation().rollRad());
+        System.out.printf("[drift] person 1 m off the axis, 60 s full ahead: yaw %.2f deg, roll %.2f deg%n", yaw, roll);
+        assertEquals(0, yaw, 1.5, "ship pulled aside");
+        assertTrue(Math.abs(roll) > 0.3, "the heel itself is real and must stay");
+    }
+
+    /**
+     * AV-027: перекачка балласта. Масса не меняется; ЦМ сдвигается на кг · Δx / m: 40 кг с носа (x = 8) на корму
+     * (x = −8) при массе 1736 кг — на 40·16/1736 = 0,3687 м назад. Приёмный мешок не переполняется (200 кг).
+     */
+    @Test
+    void ballastTransferMovesCentreOfMassAndConservesMass() {
+        FlightModel m = trimmedShip();
+        double mass = m.body().massKg(), x0 = m.body().massProperties().centerOfMass().x();
+        assertEquals(40, m.transferBallast("fwd", "aft", 40), 1e-9);
+        assertEquals(mass, m.body().massKg(), 1e-9, "mass conserved");
+        double dx = m.body().massProperties().centerOfMass().x() - x0;
+        assertEquals(-40 * 16 / mass, dx, 1e-6, "CoM shift");
+        assertEquals(200 - 132.5, m.transferBallast("fwd", "aft", 1000), 1e-9, "aft bag holds 200 kg at most");
+        assertEquals(200, m.endBallast(false).massKg(), 1e-9);
+        assertEquals("fwd", m.endBallast(true).id);
+    }
+
+    /**
+     * AV-027, жалоба «тянет вниз/в сторону» с рулевым у поста: 80 кг на носу (x = 8,6) дают на полном ходу дифферент
+     * −9° и проседание 0,86 м/с. Перекачали 40 кг воды в корму (момент 640 кг·м против 688 кг·м рулевого) —
+     * дифферент меньше 2°, проседание меньше 0,2 м/с.
+     */
+    @Test
+    void trimmingBallastLevelsShipWithHelmsmanAtTheBow() {
+        double[][] out = new double[2][];
+        for (int k = 0; k < 2; k++) {
+            FlightModel m = ship(0);
+            m.setPayload(List.of(new FlightModel.Payload(new Vec3d(8.6, PrototypeShip.DECK_TOP, 0), 80)));
+            m.weighOff(env(null));
+            if (k == 1) m.transferBallast("fwd", "aft", 40);
+            m.setTelegraph("all", com.airshipvoyage.core.propulsion.Telegraph.FULL);
+            run(m, env(null), 60);
+            out[k] = new double[]{Math.toDegrees(m.body().orientation().pitchRad()), m.body().velocity().y()};
+        }
+        System.out.printf("[trim] helmsman at the bow: pitch %.2f deg, vy %.3f; trimmed 40 kg aft: pitch %.2f deg, vy %.3f%n",
+                out[0][0], out[0][1], out[1][0], out[1][1]);
+        assertTrue(out[0][0] < -7, "untrimmed should dive nose-down");
+        assertTrue(Math.abs(out[1][0]) < 2 && Math.abs(out[1][1]) < 0.2, "trim did not level the ship");
     }
 
     /** Руль высоты на ходу задирает нос: +15° на полном ходу — нос выше, чем без руля, больше чем на 0,5°. */

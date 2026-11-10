@@ -156,6 +156,7 @@ public final class AirshipCommands {
                         .then(Commands.literal("launch").executes(AirshipCommands::buildLaunch)))
                 .then(Commands.literal("stop").executes(AirshipCommands::stop))
                 .then(Commands.literal("info").executes(AirshipCommands::info))
+                .then(Commands.literal("list").executes(AirshipCommands::list))
                 .then(Commands.literal("remove").executes(AirshipCommands::remove)));
     }
 
@@ -316,6 +317,33 @@ public final class AirshipCommands {
         ship.discard();
         c.getSource().sendSuccess(() -> Component.translatable("commands.airshipvoyage.removed"), true);
         return 1;
+    }
+
+    /** Все корабли измерения из реестра (ТЗ 22.9, AV-017): где были в последний раз, загружены ли, держат ли чанки. */
+    private static int list(CommandContext<CommandSourceStack> c) {
+        var level = c.getSource().getLevel();
+        var records = com.airshipvoyage.world.ShipRecords.get(level).entries();
+        if (records.isEmpty()) {
+            c.getSource().sendSuccess(() -> Component.literal("Кораблей в этом измерении нет"), false);
+            return 0;
+        }
+        long now = level.getGameTime();
+        StringBuilder text = new StringBuilder("Кораблей: " + records.size());
+        for (var e : records) {
+            var entity = level.getEntity(e.id());
+            String state;
+            if (entity instanceof AirshipEntity s) {
+                state = s.isUnderConstruction() ? "стройка" : !s.heldChunks().isEmpty()
+                        ? String.format(Locale.ROOT, "в полёте, держит %d чанк(ов)", s.heldChunks().size())
+                        : s.pausedTicks() > 0 ? "пауза: край загруженной области" : "загружен";
+            } else {
+                state = String.format(Locale.ROOT, "выгружен, был %d с назад", Math.max(0, now - e.seenGameTime()) / 20);
+            }
+            text.append(String.format(Locale.ROOT, "%n%s · %s · %.0f %.0f %.0f · %s", e.id().toString().substring(0, 8),
+                    e.layout(), e.x(), e.y(), e.z(), state));
+        }
+        c.getSource().sendSuccess(() -> Component.literal(text.toString()), false);
+        return records.size();
     }
 
     private static int info(CommandContext<CommandSourceStack> c) throws CommandSyntaxException {

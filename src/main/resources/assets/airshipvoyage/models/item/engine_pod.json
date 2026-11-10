@@ -1,4 +1,6 @@
 {
   "parent": "minecraft:item/generated",
-  "textures": { "layer0": "minecraft:block/blast_furnace_front" }
+  "textures": {
+    "layer0": "airshipvoyage:item/engine_pod"
+  }
 }

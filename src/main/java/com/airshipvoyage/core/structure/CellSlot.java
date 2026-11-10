@@ -19,6 +19,12 @@ public record CellSlot(String id, OrientedBox bay, double fillFactor, double env
     /** Вместимость мешка, м³. */
     public double capacityM3() { return bay.volume() * fillFactor; }
 
+    /** Заправочный штуцер под отсеком, доступный с киля (ТЗ 7.3); пока условная коробка 30 см. */
+    public OrientedBox fillingPort() {
+        return OrientedBox.axisAligned(bay.center().add(0, -bay.halfExtents().y() - 0.15, 0),
+                new com.airshipvoyage.core.math.Vec3d(0.3, 0.3, 0.3));
+    }
+
     /** Площадь оболочки, м² (по коробке отсека — оценка сверху). */
     public double surfaceM2() {
         double x = bay.halfExtents().x() * 2, y = bay.halfExtents().y() * 2, z = bay.halfExtents().z() * 2;

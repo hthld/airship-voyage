@@ -23,6 +23,8 @@ public final class ClientSetup {
     public static void registerKeys(RegisterKeyMappingsEvent event) {
         event.register(HelmClient.BALLAST);
         event.register(HelmClient.VENT);
+        event.register(HelmClient.TRIM_UP);
+        event.register(HelmClient.TRIM_DOWN);
     }
 
     /** Приборы поста — поверх всего интерфейса, только пока игрок у штурвала. */

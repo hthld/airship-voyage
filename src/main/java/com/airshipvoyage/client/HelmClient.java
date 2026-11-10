@@ -44,6 +44,11 @@ public final class HelmClient {
             GLFW.GLFW_KEY_B, CATEGORY);
     public static final KeyMapping VENT = new KeyMapping("key.airshipvoyage.vent", InputConstants.Type.KEYSYM,
             GLFW.GLFW_KEY_V, CATEGORY);
+    /** Перекачка балласта (AV-027): ↑ — нос вверх (вода в корму), ↓ — нос вниз. */
+    public static final KeyMapping TRIM_UP = new KeyMapping("key.airshipvoyage.trim_up", InputConstants.Type.KEYSYM,
+            GLFW.GLFW_KEY_UP, CATEGORY);
+    public static final KeyMapping TRIM_DOWN = new KeyMapping("key.airshipvoyage.trim_down", InputConstants.Type.KEYSYM,
+            GLFW.GLFW_KEY_DOWN, CATEGORY);
 
     private static boolean wasUp, wasDown;
 
@@ -84,8 +89,11 @@ public final class HelmClient {
             int step = (up && !wasUp ? 1 : 0) - (down && !wasDown ? 1 : 0);
             float rudder = (float) ((o.keyLeft.isDown() ? HelmService.RUDDER_DEG : 0) - (o.keyRight.isDown() ? HelmService.RUDDER_DEG : 0));
             float elevator = (float) ((o.keyJump.isDown() ? HelmService.ELEVATOR_DEG : 0) - (o.keySprint.isDown() ? HelmService.ELEVATOR_DEG : 0));
-            PacketDistributor.sendToServer(new AirshipNetwork.HelmInput(ship.getId(), step, rudder, elevator,
-                    VENT.isDown(), BALLAST.consumeClick()));
+            int flags = (VENT.isDown() ? AirshipNetwork.HelmInput.VENT : 0)
+                    | (BALLAST.consumeClick() ? AirshipNetwork.HelmInput.DROP : 0)
+                    | (TRIM_UP.isDown() ? AirshipNetwork.HelmInput.TRIM_UP : 0)
+                    | (TRIM_DOWN.isDown() ? AirshipNetwork.HelmInput.TRIM_DOWN : 0);
+            PacketDistributor.sendToServer(new AirshipNetwork.HelmInput(ship.getId(), step, rudder, elevator, flags));
         }
         wasUp = up;
         wasDown = down;
@@ -116,6 +124,8 @@ public final class HelmClient {
                 Component.translatable("hud.airshipvoyage.speed", fmt("%.1f", t.getFloat("spd")), fmt("%.1f", t.getFloat("spd") * 3.6),
                         fmt("%+.2f", t.getFloat("vs"))).getString(),
                 Component.translatable("hud.airshipvoyage.altitude", fmt("%.0f", t.getFloat("alt"))).getString(),
+                Component.translatable("hud.airshipvoyage.trim", fmt("%+.1f", t.getFloat("pitch")),
+                        fmt("%.0f", t.getFloat("bf")), fmt("%.0f", t.getFloat("ba"))).getString(),
                 Component.translatable(heavy > 0.5 ? "hud.airshipvoyage.heavy" : heavy < -0.5 ? "hud.airshipvoyage.light"
                         : "hud.airshipvoyage.balanced", fmt("%.0f", Math.abs(heavy))).getString(),
                 Component.translatable("hud.airshipvoyage.load", fmt("%.0f", t.getFloat("b")), fmt("%.0f", t.getFloat("p")),

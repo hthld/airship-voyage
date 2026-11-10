@@ -220,15 +220,20 @@ public class AirshipEntity extends Entity {
     public void syncCells(boolean force) {
         if (level().isClientSide || layout.cells().isEmpty()) return;
         WorldEnvironment env = environment();
+        // На сервере cellFill/cellLeaking — последнее ОТПРАВЛЕННОЕ состояние. Сравниваем с ним, а не с прошлым
+        // замером: иначе медленная утечка (за 5 тиков меньше порога) не отправлялась бы никогда (ревью 2, №6).
+        int n = cellFill.length;
+        float[] fill = new float[n];
+        boolean[] leaking = new boolean[n];
         boolean changed = force;
-        for (int i = 0; i < cellFill.length; i++) {
-            float f = (float) flight.fill(i, env);
-            boolean leak = flight.cells().get(i).leakPerSecond() > 0;
-            if (Math.abs(f - cellFill[i]) > 0.002f || leak != cellLeaking[i]) changed = true;
-            cellFill[i] = f;
-            cellLeaking[i] = leak;
+        for (int i = 0; i < n; i++) {
+            fill[i] = (float) flight.fill(i, env);
+            leaking[i] = flight.cells().get(i).leakPerSecond() > 0;
+            if (Math.abs(fill[i] - cellFill[i]) > 0.002f || leaking[i] != cellLeaking[i]) changed = true;
         }
         if (!changed) return;
+        System.arraycopy(fill, 0, cellFill, 0, n);
+        System.arraycopy(leaking, 0, cellLeaking, 0, n);
         CompoundTag tag = new CompoundTag();
         ListTag fills = new ListTag(), leaks = new ListTag();
         for (int i = 0; i < cellFill.length; i++) {
@@ -449,8 +454,14 @@ public class AirshipEntity extends Entity {
                 continue;
             }
             Vec3d moved = HullCollider.carry(foot, oldPos, oldRot, newPos, newRot);
-            c.lastCarry = new net.minecraft.world.phys.Vec3(moved.x() - foot.x(), moved.y() - foot.y(), moved.z() - foot.z());
-            e.setPos(moved.x(), moved.y(), moved.z());
+            // Ревью 2, №2: перенос — тоже движение, и блоки мира его останавливают (низкий потолок над палубой,
+            // стена сбоку). Сам корабль здесь не учитывается — иначе несущая палуба мешала бы своему пассажиру.
+            // Остановленного блоком палуба «обгоняет»: он теряет опору и дальше движется сам.
+            net.minecraft.world.phys.Vec3 want = new net.minecraft.world.phys.Vec3(
+                    moved.x() - foot.x(), moved.y() - foot.y(), moved.z() - foot.z());
+            net.minecraft.world.phys.Vec3 allowed = Entity.collideBoundingBox(e, want, e.getBoundingBox(), level(), List.of());
+            c.lastCarry = allowed;
+            e.setPos(foot.x() + allowed.x, foot.y() + allowed.y, foot.z() + allowed.z);
             if (yawDelta != 0) {
                 e.setYRot(e.getYRot() + yawDelta);
                 if (e instanceof net.minecraft.world.entity.LivingEntity living) {
@@ -529,16 +540,20 @@ public class AirshipEntity extends Entity {
         if (tag.contains("Layout", Tag.TAG_STRING)) setLayoutById(tag.getString("Layout"));
         RigidBody body = flight.body();
         body.setPosition(new Vec3d(getX(), getY(), getZ()));
+        body.setVelocity(Vec3d.ZERO);
+        body.setAngularVelocity(Vec3d.ZERO);
+        // Ревью 2, №3: сначала газ и балласт — окончательная масса и центр масс, и только потом скорости.
+        // Пересборка массы при вращении добавляет ω × ΔЦМ (так и надо в полёте), но сохранённая скорость уже
+        // относится к окончательному центру масс — при загрузке эта поправка была бы лишней.
+        readFlightState(tag);
         if (tag.contains("Orientation", Tag.TAG_LIST)) {
             ListTag l = tag.getList("Orientation", Tag.TAG_DOUBLE);
             if (l.size() == 4) {
-                body.setAngularVelocity(Vec3d.ZERO);
                 body.setOrientation(new Quat(l.getDouble(0), l.getDouble(1), l.getDouble(2), l.getDouble(3)));
             }
         }
         body.setVelocity(readVec(tag, "Velocity"));
         body.setAngularVelocity(readVec(tag, "AngularVelocity"));
-        readFlightState(tag);
         // стройка (ТЗ, 4.4): установленные детали остаются на местах после перезапуска мира
         if (tag.contains("Construction", Tag.TAG_LIST)) {
             List<String> installed = readStrings(tag, "Construction");
@@ -589,6 +604,12 @@ public class AirshipEntity extends Entity {
             }
         }
         flight.massChanged();
+    }
+
+    /** Наполнение камеры {@code index}, которое сейчас видят клиенты (значение синхронизируемых данных), −1 — нет. */
+    public float syncedCellFill(int index) {
+        ListTag fills = entityData.get(DATA_CELLS).getList("fill", Tag.TAG_FLOAT);
+        return index < fills.size() ? fills.getFloat(index) : -1;
     }
 
     /** Ориентация, которую сейчас видят клиенты (значение синхронизируемых данных). */

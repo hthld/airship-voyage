@@ -9,6 +9,8 @@ import com.airshipvoyage.core.structure.PrototypeShip;
 import com.airshipvoyage.core.structure.ShipLayouts;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 class FlightModelTest {
@@ -214,6 +216,58 @@ class FlightModelTest {
         assertTrue(m.weighOff(env) == Double.POSITIVE_INFINITY);
         run(m, env, 2);
         assertTrue(m.body().velocity().y() < -5);
+    }
+
+    // ------------------------------------------------------------------ ревью 2, №5: блок под серединой грани
+
+    /** Мир из блоков — как в игре, снимок коллизионных коробок. */
+    private static FlightModel.Environment blocks(List<Aabb> boxes) {
+        CollisionBoxes w = new CollisionBoxes(boxes);
+        return new FlightModel.Environment() {
+            @Override public double altitudeMeters(double worldY) { return worldY; }
+            @Override public Atmosphere atmosphere() { return Atmosphere.STANDARD; }
+            @Override public FlightModel.ContactQuery contacts() { return w; }
+        };
+    }
+
+    private static Aabb block(int x, int y, int z) {
+        return new Aabb(new Vec3d(x, y, z), new Vec3d(x + 1, y + 1, z + 1));
+    }
+
+    /**
+     * Сценарий GPT: прототип в (0,5; 70; 0,5), единственный блок (5, 64, 0). Киль — от (−9,5; 64,5; −0,5) до
+     * (10,5; 64,75; 1,5), блок его пересекает, но ни одна из ≈ 1000 точек на рёбрах в блок не попадает
+     * (кромки киля — z = −0,5 и 1,5, кольца в стороне). Было: 0 точек контакта. Должен быть ровно один контакт
+     * грани: выталкивание вверх на 65 − 64,5 = 0,5 м (вниз — 0,75, вбок — больше).
+     */
+    @Test
+    void blockUnderMiddleOfKeelIsDetected() {
+        FlightModel m = ShipLayouts.newFlightModel(PrototypeShip.layout());
+        m.place(new Vec3d(0.5, 70, 0.5), Quat.IDENTITY);
+        m.setNeutral(true);
+        m.step(DT, blocks(List.of(block(5, 64, 0))));
+        assertEquals(1, m.lastReport().contactPoints());
+        // одна точка с k = 400·m_эфф и глубиной, ограниченной 0,25 м, даёт ≈ 100 м/с² вверх, пока демпфер не погасит
+        assertTrue(m.body().velocity().y() > 1, "keel was not pushed out of the block: vy " + m.body().velocity().y());
+    }
+
+    /**
+     * Рельс из блоков под серединой киля (z от 0 до 1, кромки киля — z = −0,5 и 1,5), в стороне от колец.
+     * Корабль без газа опускается с 0,3 м и должен лечь килем на рельс, а не пройти сквозь (было: свободное падение).
+     */
+    @Test
+    void keelLandsOnRailBetweenItsEdges() {
+        List<Aabb> rail = new java.util.ArrayList<>();
+        for (int x = -8; x <= -3; x++) rail.add(block(x, 64, 0));
+        for (int x = 2; x <= 7; x++) rail.add(block(x, 64, 0));
+        FlightModel m = ShipLayouts.newFlightModel(PrototypeShip.layout());
+        m.place(new Vec3d(0.5, 70.8, 0.5), Quat.IDENTITY); // низ киля (−5,5) на 65,3
+        var env = blocks(rail);
+        run(m, env, 3);
+        double keelBottom = m.body().position().y() - 5.5;
+        assertTrue(m.lastReport().grounded(), "not resting on the rail");
+        assertTrue(keelBottom > 64.9 && keelBottom < 65.0, "keel bottom " + keelBottom);
+        assertTrue(Math.abs(m.body().velocity().y()) < 0.05, "vy " + m.body().velocity().y());
     }
 
     @Test

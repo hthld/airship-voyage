@@ -48,7 +48,21 @@ public final class ShipLayout {
         this.boundsMin = new Vec3d(mn[0], mn[1], mn[2]);
         this.boundsMax = new Vec3d(mx[0], mx[1], mx[2]);
         this.contactSamples = Collections.unmodifiableList(buildContactSamples(shapes, CONTACT_SAMPLE_SPACING));
+        this.sampleShapes = new int[contactSamples.size()][];
+        for (int i = 0; i < contactSamples.size(); i++) {
+            Vec3d p = contactSamples.get(i);
+            int[] own = new int[shapes.size()];
+            int n = 0;
+            for (int k = 0; k < shapes.size(); k++) if (shapes.get(k).distanceTo(p) < 1e-6) own[n++] = k;
+            sampleShapes[i] = java.util.Arrays.copyOf(own, n);
+        }
     }
+
+    /** Для каждой точки контакта — индексы форм ({@link #hullShapes()}), на поверхности которых она лежит. */
+    private final int[][] sampleShapes;
+
+    /** Формы, которым принадлежит точка контакта {@code sampleIndex} (точки соседних деталей общие). */
+    public int[] sampleShapes(int sampleIndex) { return sampleShapes[sampleIndex]; }
 
     /** Шаг точек контакта по рёбрам деталей, м. Меньше — точнее касание выступов, но дороже. */
     public static final double CONTACT_SAMPLE_SPACING = 1.0;

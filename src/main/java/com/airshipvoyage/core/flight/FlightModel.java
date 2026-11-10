@@ -15,7 +15,9 @@ import com.airshipvoyage.core.structure.ShipLayout;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 import static com.airshipvoyage.core.physics.PhysicalConstants.G;
 
@@ -80,10 +82,25 @@ public final class FlightModel {
 
         /** Насколько точка вошла в твёрдое и куда её выталкивать; {@code null}, если точка свободна. */
         Penetration probe(Vec3d worldPoint);
+
+        /**
+         * Снимок мира в области на один тик (игровой слой собирает коробки блоков один раз — {@link CollisionBoxes}).
+         * По умолчанию — сам запрос (тестовые «полупространства»).
+         */
+        default ContactQuery snapshot(Aabb region) { return this; }
+
+        /** Коробки твёрдого, пересекающие область, — для контакта граней деталей; пусто — запрос коробок не знает. */
+        default List<Aabb> boxesIn(Aabb region) { return List.of(); }
     }
 
-    /** @param normal единичная нормаль наружу из твёрдого @param depth глубина, м */
-    public record Penetration(Vec3d normal, double depth) {}
+    /**
+     * @param normal единичная нормаль наружу из твёрдого
+     * @param depth  глубина, м
+     * @param box    коробка блока, в которую вошла точка ({@code null}, если запрос коробок не знает)
+     */
+    public record Penetration(Vec3d normal, double depth, Aabb box) {
+        public Penetration(Vec3d normal, double depth) { this(normal, depth, null); }
+    }
 
     /** Сброшенный балласт / груз в точке корпуса. */
     public static final class Ballast {
@@ -173,7 +190,11 @@ public final class FlightModel {
 
         Vec3d[] box = layout.worldAabb(body.position(), body.orientation());
         Aabb bounds = new Aabb(box[0], box[1]).inflate(0.5, 0.5, 0.5);
-        boolean contactPossible = env.contacts().mayContact(bounds);
+        // снимок блоков на весь тик: габарит плюс путь, который корпус может пройти за тик (с вращением)
+        double reach = (body.velocity().length() + body.angularVelocity().length() * layout.boundingRadius()) * dt
+                + MAX_CONTACT_DEPTH + 0.5;
+        ContactQuery world = env.contacts().snapshot(bounds.inflate(reach, reach, reach));
+        boolean contactPossible = world.mayContact(bounds);
         int n = contactPossible ? CONTACT_SUBSTEPS : 1;
         double h = dt / n;
 
@@ -182,7 +203,7 @@ public final class FlightModel {
         for (int s = 0; s < n; s++) {
             applyAeroAndGravity(env);
             if (contactPossible) {
-                double[] r = applyContacts(env.contacts());
+                double[] r = applyContacts(world);
                 contacts = (int) r[0];
                 force = r[1];
                 impact = Math.max(impact, r[2]);
@@ -222,14 +243,18 @@ public final class FlightModel {
         List<Vec3d> samples = layout.contactSamples();
         List<Vec3d> points = new ArrayList<>();
         List<Penetration> pens = new ArrayList<>();
-        for (Vec3d local : samples) {
-            Vec3d wp = body.localToWorld(local);
+        // пары «форма детали — коробка блока», уже охваченные точками на рёбрах
+        Set<ShapeBox> touched = new HashSet<>();
+        for (int i = 0; i < samples.size(); i++) {
+            Vec3d wp = body.localToWorld(samples.get(i));
             Penetration p = query.probe(wp);
             if (p != null && p.depth() > 0) {
                 points.add(wp);
                 pens.add(p);
+                if (p.box() != null) for (int k : layout.sampleShapes(i)) touched.add(new ShapeBox(k, p.box()));
             }
         }
+        addFaceContacts(query, touched, points, pens);
         int n = points.size();
         if (n == 0) return new double[]{0, 0, 0};
 
@@ -257,6 +282,89 @@ public final class FlightModel {
             total += fn;
         }
         return new double[]{n, total, impact};
+    }
+
+    private record ShapeBox(int shape, Aabb box) {}
+
+    /**
+     * Ревью 2, №5: точки контакта стоят только на рёбрах деталей, и блок, вошедший в середину грани (выступ под
+     * серединой киля), их не задевал — киль проходил сквозь него. Для каждой пары «форма детали — коробка блока»,
+     * которые пересекаются, но ни одна точка этой формы в коробку не попала, добавляется контакт грани.
+     */
+    private void addFaceContacts(ContactQuery query, Set<ShapeBox> touched, List<Vec3d> points, List<Penetration> pens) {
+        List<OrientedBox> shapes = layout.hullShapes();
+        for (int k = 0; k < shapes.size(); k++) {
+            OrientedBox w = shapes.get(k).transformed(body.position(), body.orientation());
+            Aabb wb = new Aabb(w.aabbMin(), w.aabbMax());
+            for (Aabb a : query.boxesIn(wb)) {
+                // касание гранью (нулевой объём пересечения) — не контакт
+                if (touched.contains(new ShapeBox(k, a))
+                        || !w.intersectsAabb(a.min().add(1e-6, 1e-6, 1e-6), a.max().sub(new Vec3d(1e-6, 1e-6, 1e-6)))) continue;
+                FaceContact c = faceContact(w, wb, a, query);
+                if (c == null || c.depth() <= 0) continue;
+                points.add(c.point());
+                pens.add(new Penetration(c.normal(), c.depth(), a));
+            }
+        }
+    }
+
+    /** Контакт грани: точка на поверхности детали, нормаль выталкивания (наружу из блока), глубина. */
+    record FaceContact(Vec3d point, Vec3d normal, double depth) {}
+
+    /**
+     * Контакт формы детали {@code w} (её AABB — {@code wb}) с коробкой блока {@code a}. Как и для точки: выталкиваем
+     * к ближайшей открытой грани блока. Глубина вдоль нормали ищется лучами через область перекрытия (4 угла и центр):
+     * луч идёт по нормали из-за детали и находит её поверхность, обращённую к грани; берётся самый глубокий.
+     * Все грани закрыты (деталь глубоко в массиве) — вверх, не больше 0,5 м, как у точек.
+     */
+    static FaceContact faceContact(OrientedBox w, Aabb wb, Aabb a, ContactQuery query) {
+        FaceContact best = null, up = null;
+        for (int axis = 0; axis < 3; axis++) {
+            int t1 = (axis + 1) % 3, t2 = (axis + 2) % 3;
+            double lo1 = Math.max(a.min(t1), wb.min(t1)), hi1 = Math.min(a.max(t1), wb.max(t1));
+            double lo2 = Math.max(a.min(t2), wb.min(t2)), hi2 = Math.min(a.max(t2), wb.max(t2));
+            if (lo1 > hi1 || lo2 > hi2) continue;
+            double[][] uv = {{lo1, lo2}, {hi1, lo2}, {lo1, hi2}, {hi1, hi2}, {(lo1 + hi1) / 2, (lo2 + hi2) / 2}};
+            for (int sign = -1; sign <= 1; sign += 2) {
+                Vec3d push = CollisionBoxes.unit(axis, sign);
+                double start = sign > 0 ? wb.min(axis) - 1 : wb.max(axis) + 1;
+                double[] depths = new double[uv.length];
+                Vec3d[] entries = new Vec3d[uv.length];
+                double deepest = 0;
+                for (int i = 0; i < uv.length; i++) {
+                    double t = w.rayHit(point(axis, start, t1, uv[i][0], t2, uv[i][1]), push);
+                    if (Double.isNaN(t)) continue;
+                    double entry = start + sign * t;
+                    depths[i] = sign > 0 ? a.max(axis) - entry : entry - a.min(axis);
+                    entries[i] = point(axis, entry, t1, uv[i][0], t2, uv[i][1]);
+                    deepest = Math.max(deepest, depths[i]);
+                }
+                if (deepest <= 0) continue;
+                // точка опоры — среднее самых глубоких: у плоского касания это центр перекрытия, а не угол блока
+                Vec3d sum = Vec3d.ZERO;
+                int count = 0;
+                for (int i = 0; i < uv.length; i++) {
+                    if (entries[i] != null && depths[i] >= deepest - 1e-6) {
+                        sum = sum.add(entries[i]);
+                        count++;
+                    }
+                }
+                Vec3d at = sum.scale(1.0 / count);
+                if (axis == 1 && sign > 0) up = new FaceContact(at, push, Math.min(deepest, 0.5));
+                double face = sign > 0 ? a.max(axis) : a.min(axis);
+                if (query.probe(point(axis, face + sign * 1e-4, t1, uv[4][0], t2, uv[4][1])) != null) continue; // закрыта
+                if (best == null || deepest < best.depth()) best = new FaceContact(at, push, deepest);
+            }
+        }
+        return best != null ? best : up;
+    }
+
+    private static Vec3d point(int axis, double v, int t1, double v1, int t2, double v2) {
+        double[] c = new double[3];
+        c[axis] = v;
+        c[t1] = v1;
+        c[t2] = v2;
+        return new Vec3d(c[0], c[1], c[2]);
     }
 
     private Atmosphere.State airAtLocal(Vec3d local, Environment env) {

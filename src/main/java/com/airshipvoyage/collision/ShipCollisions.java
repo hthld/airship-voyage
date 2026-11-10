@@ -8,7 +8,9 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.phys.shapes.VoxelShape;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.WeakHashMap;
@@ -45,28 +47,60 @@ public final class ShipCollisions {
         }
     }
 
-    /** Обрезать уже обработанное блоками смещение {@code movement} о детали ближайших кораблей. */
+    /**
+     * Обрезать уже обработанное блоками смещение {@code movement} о детали ближайших кораблей.
+     * Итог снова сверяется с блоками (ревью 2, №1): у повёрнутого корпуса обрезка по его осям может увеличить
+     * мировую составляющую и завести сущность в блок, который ваниль уже обошла. Детали дают и «ступеньку»
+     * (подъём до {@code maxUpStep} без прыжка), как блоки.
+     */
     public static Vec3 collide(Entity entity, Vec3 movement) {
         if (entity instanceof AirshipEntity || !participates(entity)) return movement;
         if (movement.lengthSqr() == 0) return movement;
 
         AABB box = entity.getBoundingBox();
-        List<AirshipEntity> ships = ShipRegistry.shipsIntersecting(entity.level(), box.expandTowards(movement).inflate(1.0));
+        double step = entity.maxUpStep();
+        List<AirshipEntity> ships = ShipRegistry.shipsIntersecting(entity.level(),
+                box.expandTowards(movement).expandTowards(0, step, 0).inflate(1.0));
         if (ships.isEmpty()) return movement;
 
-        Vec3 result = movement;
+        HullCollider.Resolution r = HullCollider.resolve(
+                new Vec3d(box.minX, box.minY, box.minZ), new Vec3d(box.maxX, box.maxY, box.maxZ),
+                new Vec3d(movement.x, movement.y, movement.z), shipShapes(ships), blocksOf(entity, box),
+                step, entity.onGround());
+        if (r.landedOn() >= 0) markLanded(entity, ships.get(r.landedOn()));
+        if (!r.changed()) return movement;
+        return new Vec3(r.movement().x(), r.movement().y(), r.movement().z());
+    }
+
+    /** Блоки мира (и твёрдые сущности вроде лодок) с ванильной обрезкой — для согласования с кораблями. */
+    private static HullCollider.WorldClipper blocksOf(Entity entity, AABB box) {
+        return (min, max, move) -> {
+            Vec3 m = new Vec3(move.x(), move.y(), move.z());
+            List<VoxelShape> entities = entity.level().getEntityCollisions(entity, box.expandTowards(m));
+            Vec3 c = Entity.collideBoundingBox(entity, m, box, entity.level(), entities);
+            return new Vec3d(c.x, c.y, c.z);
+        };
+    }
+
+    private static List<HullCollider.Ship> shipShapes(List<AirshipEntity> ships) {
+        List<HullCollider.Ship> out = new ArrayList<>(ships.size());
         for (AirshipEntity ship : ships) {
-            if (ship.layout() == null) continue;
-            Vec3d pos = new Vec3d(ship.getX(), ship.getY(), ship.getZ());
-            Quat rot = ship.orientation();
-            HullCollider.Result r = HullCollider.collideWorld(
-                    new Vec3d(box.minX, box.minY, box.minZ), new Vec3d(box.maxX, box.maxY, box.maxZ),
-                    new Vec3d(result.x, result.y, result.z), pos, rot, ship.hullShapes());
-            if (!r.blocked()) continue;
-            result = new Vec3(r.movement().x(), r.movement().y(), r.movement().z());
-            if (r.landed()) markLanded(entity, ship);
+            out.add(new HullCollider.Ship(new Vec3d(ship.getX(), ship.getY(), ship.getZ()), ship.orientation(), ship.hullShapes()));
         }
-        return result;
+        return out;
+    }
+
+    /**
+     * Есть ли опора из деталей кораблей в области под ногами — для ходьбы с Shift (ТЗ 12.2, ревью 2, №4).
+     * Ваниль ({@code Player.canFallAtLeast}) проверяет только блоки и до обработки столкновений, поэтому
+     * на палубе над пустотой с Shift нельзя было сделать ни шага, а у края — не останавливало.
+     */
+    public static boolean supports(Entity entity, AABB probe) {
+        if (!participates(entity)) return false;
+        List<AirshipEntity> ships = ShipRegistry.shipsIntersecting(entity.level(), probe.inflate(1.0));
+        if (ships.isEmpty()) return false;
+        return HullCollider.supports(new Vec3d(probe.minX, probe.minY, probe.minZ),
+                new Vec3d(probe.maxX, probe.maxY, probe.maxZ), shipShapes(ships));
     }
 
     /** Кто сталкивается с кораблями на этой стороне. */

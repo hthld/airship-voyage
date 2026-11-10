@@ -664,5 +664,182 @@ public final class AirshipGameTests {
 
     private static Vec3d posOf(Entity e) { return new Vec3d(e.getX(), e.getY(), e.getZ()); }
 
+    // ------------------------------------------------------------------ ревью 2 и наблюдения владельца
+
+    /**
+     * Ревью 2, №3: сохранение и загрузка вращающегося корабля со смещённой центровкой не меняют его скорость.
+     * Сбросили 50 кг из носового балласта: ЦМ по X = (50·8 − 100·8) / 1347,05 = −0,297 м. При старом порядке
+     * загрузки (скорости, потом балласт) пересборка массы добавляла ω × ΔЦМ = (0, 1, 0) × (−0,297, 0, 0) = 0,297 м/с по Z.
+     */
+    @GameTest(template = DOCK)
+    public static void loadKeepsVelocityOfSpinningShipWithShiftedBalance(GameTestHelper h) {
+        Vec3 p = h.absoluteVec(new Vec3(14, 12, 14));
+        AirshipEntity ship = new AirshipEntity(ModEntities.AIRSHIP.get(), h.getLevel());
+        ship.setLayoutById(PrototypeShip.LAYOUT_ID);
+        ship.placeAt(new Vec3d(p.x, p.y, p.z), Quat.IDENTITY);
+        ship.flight().dropBallast("fwd", 50);
+        ship.body().setVelocity(Vec3d.ZERO);
+        ship.body().setAngularVelocity(new Vec3d(0, 1, 0));
+        double comX = ship.body().massProperties().centerOfMass().x();
+
+        CompoundTag tag = new CompoundTag();
+        ship.saveWithoutId(tag);
+        AirshipEntity copy = new AirshipEntity(ModEntities.AIRSHIP.get(), h.getLevel());
+        copy.load(tag);
+        Vec3d v = copy.body().velocity();
+        AirshipVoyage.LOGGER.info("[test] load of spinning ship: CoM x {} m, velocity after load {}", String.format("%.6f", comX), v);
+        h.assertTrue(Math.abs(comX + 400 / 1347.052) < 1e-3, "CoM x " + comX);
+        h.assertTrue(v.length() < 1e-9, "velocity changed by loading: " + v);
+        h.assertTrue(copy.body().angularVelocity().distanceTo(new Vec3d(0, 1, 0)) < 1e-9, "spin lost: " + copy.body().angularVelocity());
+        h.succeed();
+    }
+
+    /**
+     * Ревью 2, №6: медленная утечка доходит до клиентов. Утечка 0,0075 1/с: за 5 тиков мешок на 80 % теряет
+     * 0,8·(1 − e^(−0,0075·0,25)) ≈ 0,0015 — меньше порога 0,002. Старый код сравнивал с прошлым замером и не
+     * отправлял ничего; за 5 с наполнение падает до 0,8·e^(−0,0375) ≈ 0,771, а клиенты видели бы 0,8.
+     */
+    @GameTest(template = DOCK, timeoutTicks = 300)
+    public static void slowLeakReachesClients(GameTestHelper h) {
+        AirshipEntity ship = spawnFlyingShip(h, 12);
+        ship.flight().setNeutral(true);
+        ship.flight().setFillAll(0.8, ship.environment());
+        ship.flight().cells().get(0).setLeakPerSecond(0.0075);
+        ship.syncCells(true);
+        onShipTicks(h, ship, new java.util.TreeMap<>(java.util.Map.of(
+                101, () -> {
+                    double actual = ship.flight().fill(0, ship.environment());
+                    float synced = ship.syncedCellFill(0);
+                    AirshipVoyage.LOGGER.info("[test] slow leak after 5 s: actual fill {}, clients see {}",
+                            String.format("%.4f", actual), String.format("%.4f", synced));
+                    h.assertTrue(actual < 0.78 && actual > 0.76, "leak did not work: " + actual);
+                    h.assertTrue(Math.abs(synced - actual) < 0.004, "clients see " + synced + ", actual " + actual);
+                    h.succeed();
+                })));
+    }
+
+    /**
+     * Ревью 2, №7: столб забора (коллизия до 1,5 блока) — верхняя половина стоит в клетке над забором.
+     * Раньше проверялся только блок своей клетки — там воздух, и каркас проходил сквозь верх забора.
+     */
+    @GameTest(template = TEMPLATE)
+    public static void fenceTopIsSolidForShips(GameTestHelper h) {
+        var pos = net.minecraft.core.BlockPos.containing(h.absoluteVec(new Vec3(5, 2, 5)));
+        h.getLevel().setBlockAndUpdate(pos, net.minecraft.world.level.block.Blocks.OAK_FENCE.defaultBlockState());
+        var env = new com.airshipvoyage.physics.WorldEnvironment(h.getLevel());
+        var p = env.probe(new Vec3d(pos.getX() + 0.5, pos.getY() + 1.25, pos.getZ() + 0.5));
+        h.assertTrue(p != null && p.depth() > 0, "upper half of the fence is not solid: " + p);
+        var above = new com.airshipvoyage.core.math.Aabb(new Vec3d(pos.getX(), pos.getY() + 1.1, pos.getZ()),
+                new Vec3d(pos.getX() + 1, pos.getY() + 2, pos.getZ() + 1));
+        h.assertTrue(env.mayContact(above), "region above the fence cell reported empty");
+        h.succeed();
+    }
+
+    /**
+     * Ревью 2, №2: перенос палубой останавливается блоком. Каркас поднимается на 1 м/с; над головой стойки —
+     * блок в пустом пространстве между килем и балкой (сам каркас его не касается). Раньше перенос ставил стойку
+     * прямо в блок.
+     */
+    @GameTest(template = TEMPLATE, timeoutTicks = 300)
+    public static void carriedEntityStopsUnderBlock(GameTestHelper h) {
+        AirshipEntity ship = spawnShip(h);
+        var stand = dropOnDeck(h, ship, 2, 0);
+        net.minecraft.core.BlockPos[] lid = new net.minecraft.core.BlockPos[1];
+        double[] y0 = new double[1];
+        double[] maxHead = {Double.NEGATIVE_INFINITY};
+        h.onEachTick(() -> {
+            if (lid[0] != null) maxHead[0] = Math.max(maxHead[0], stand.getBoundingBox().maxY);
+        });
+        onShipTicks(h, ship, new java.util.TreeMap<>(java.util.Map.of(
+                25, () -> {
+                    h.assertTrue(stand.onGround(), "stand did not land");
+                    // блок, низ которого между 0,05 и 1,05 м над головой стойки
+                    Vec3d above = new Vec3d(stand.getX(), stand.getBoundingBox().maxY + 1.05, stand.getZ());
+                    lid[0] = net.minecraft.core.BlockPos.containing(above.x(), above.y(), above.z());
+                    h.getLevel().setBlockAndUpdate(lid[0], net.minecraft.world.level.block.Blocks.STONE.defaultBlockState());
+                    y0[0] = ship.getY();
+                    ship.body().setVelocity(new Vec3d(0, 1, 0));
+                },
+                55, () -> {
+                    double lidBottom = lid[0].getY();
+                    AirshipVoyage.LOGGER.info("[test] carried under a block: ship rose {} m, highest head {} vs block bottom {}",
+                            String.format("%.3f", ship.getY() - y0[0]), String.format("%.4f", maxHead[0]), lidBottom);
+                    h.assertTrue(ship.getY() - y0[0] > 1.2, "ship did not rise enough to reach the block");
+                    // палуба донесла стойку до блока — и не дальше; прижатую палуба «обгоняет» (сдавливание не моделируется)
+                    h.assertTrue(maxHead[0] > lidBottom - 0.02, "stand never reached the block: head " + maxHead[0]);
+                    h.assertTrue(maxHead[0] <= lidBottom + 1e-4, "stand pushed into the block: head " + maxHead[0]);
+                    ship.body().freeze();
+                    h.succeed();
+                })));
+    }
+
+    /** Стойка со ступенькой как у игрока (у стойки по умолчанию 0). */
+    private static net.minecraft.world.entity.decoration.ArmorStand stepper(GameTestHelper h, AirshipEntity ship,
+                                                                            double x, double y, double z) {
+        var s = dropOnLocal(h, ship, x, y, z);
+        s.getAttribute(net.minecraft.world.entity.ai.attributes.Attributes.STEP_HEIGHT).setBaseValue(0.6);
+        return s;
+    }
+
+    /**
+     * Наблюдение владельца: на детали корабля нельзя было зайти шагом. С пола на нижнюю поперечину кольца —
+     * 0,5 м (как плита), с поперечины на настил киля — 0,25 м: ступенька 0,6 должна поднимать без прыжка.
+     * Стойку толкают горизонтально; запоминаем наибольшую высоту (в осях корпуса).
+     */
+    @GameTest(template = TEMPLATE, timeoutTicks = 300)
+    public static void entitiesStepUpOntoShipParts(GameTestHelper h) {
+        AirshipEntity ship = spawnSite(h);
+        for (String r : java.util.List.of("ring_aft", "ring_mid", "ring_fwd")) {
+            ship.construction().install(r, com.airshipvoyage.core.assembly.AssemblyPlans.RING);
+        }
+        ship.construction().install("keel", com.airshipvoyage.core.assembly.AssemblyPlans.KEEL);
+        ship.constructionChanged();
+        // A — на полу у кормового кольца, идёт к нему (−X); B — на поперечине кольца, идёт к килю (−Z)
+        var a = stepper(h, ship, -8, -5.9, 3);
+        var b = stepper(h, ship, -10, -5.0, 3);
+        double[] maxY = {-99, -99};
+        boolean[] pushing = {false};
+        h.onEachTick(() -> {
+            if (!pushing[0]) return;
+            a.setDeltaMovement(new Vec3(-0.12, a.getDeltaMovement().y, 0));
+            b.setDeltaMovement(new Vec3(0, b.getDeltaMovement().y, -0.12));
+            maxY[0] = Math.max(maxY[0], localOf(ship, a).y());
+            maxY[1] = Math.max(maxY[1], localOf(ship, b).y());
+        });
+        onShipTicks(h, ship, new java.util.TreeMap<>(java.util.Map.of(
+                25, () -> {
+                    h.assertTrue(Math.abs(localOf(ship, a).y() + 6) < 0.01, "A not on the floor: " + localOf(ship, a));
+                    h.assertTrue(Math.abs(localOf(ship, b).y() + 5.5) < 0.01, "B not on the ring crossbar: " + localOf(ship, b));
+                    pushing[0] = true;
+                },
+                65, () -> {
+                    AirshipVoyage.LOGGER.info("[test] step-up: floor → ring crossbar reached local y {}, crossbar → keel reached {}",
+                            String.format("%.4f", maxY[0]), String.format("%.4f", maxY[1]));
+                    h.assertTrue(maxY[0] > -5.5 - 0.01, "did not step from the floor onto the ring (0.5 m): max y " + maxY[0]);
+                    h.assertTrue(maxY[1] > -5.25 - 0.01, "did not step from the ring onto the keel (0.25 m): max y " + maxY[1]);
+                    h.succeed();
+                })));
+    }
+
+    /**
+     * Ревью 2, №4 и наблюдение владельца: проба «можно ли упасть» (как у {@code Player.canFallAtLeast}) на палубе
+     * должна видеть деталь как опору, за краем палубы — нет. Сама связка с ходьбой с Shift — mixin в Player
+     * (проверяется в игре: GameTest не умеет двигать настоящего игрока).
+     */
+    @GameTest(template = TEMPLATE, timeoutTicks = 200)
+    public static void deckIsSupportForSneaking(GameTestHelper h) {
+        AirshipEntity ship = spawnShip(h);
+        var stand = dropOnDeck(h, ship, 2, 0);
+        onShipTicks(h, ship, java.util.Map.of(25, () -> {
+            AABB bb = stand.getBoundingBox();
+            AABB under = new AABB(bb.minX, bb.minY - 0.6 - 1.0E-5F, bb.minZ, bb.maxX, bb.minY, bb.maxZ);
+            h.assertTrue(com.airshipvoyage.collision.ShipCollisions.supports(stand, under), "deck under the feet is not support");
+            // настил шириной 2 м (z от −1 до 1): на 1,5 м в сторону — пустота
+            h.assertTrue(!com.airshipvoyage.collision.ShipCollisions.supports(stand, under.move(0, 0, 1.5)),
+                    "air beside the deck counted as support");
+            h.succeed();
+        }));
+    }
+
     private AirshipGameTests() {}
 }

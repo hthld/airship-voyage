@@ -38,9 +38,97 @@ public final class HullCollider {
      *  @param landed   сущность опёрлась на деталь сверху (движение вниз по оси «вверх» корпуса остановлено) */
     public record Result(Vec3d movement, boolean landed, boolean blocked) {}
 
+    /**
+     * Блоки мира с ванильной семантикой: обрезать смещение коробки так, чтобы она не вошла в блоки.
+     * В игре — {@code Entity.collideBoundingBox}; в тестах — простые стены.
+     */
+    public interface WorldClipper {
+        WorldClipper NONE = (min, max, move) -> move;
+
+        Vec3d clip(Vec3d boxMin, Vec3d boxMax, Vec3d movement);
+    }
+
+    /** Корабль для столкновения: поза корпуса и формы деталей в его локальных координатах. */
+    public record Ship(Vec3d position, Quat rotation, List<OrientedBox> shapes) {}
+
+    /**
+     * Итог совместного разрешения.
+     *
+     * @param landedOn индекс корабля, на деталь которого сущность встала сверху; −1 — ни на какой
+     * @param changed  корабли изменили смещение
+     */
+    public record Resolution(Vec3d movement, int landedOn, boolean changed) {}
+
+    /** Сколько раз согласовывать корабли и блоки, прежде чем остановить сущность на месте. */
+    static final int MAX_RESOLVE_ITERATIONS = 4;
+
     private HullCollider() {}
 
+    // ------------------------------------------------------------------ корабли + блоки мира
+
+    /**
+     * Обрезать смещение, уже разрешённое блоками мира ({@code movement} — результат ванильной обработки),
+     * деталями кораблей — так, чтобы итог не входил ни в детали, ни в блоки (ревью 2, №1).
+     *
+     * <p>Детали обрезают смещение по осям своего корпуса. У повёрнутого корпуса это может <b>увеличить</b>
+     * отдельную мировую составляющую (скольжение вдоль косой стенки) и завести сущность в блок, который
+     * ваниль уже обошла. Поэтому после кораблей смещение снова проверяется блоками, и так до согласия
+     * (обычно один-два прохода). Не сошлось за {@value #MAX_RESOLVE_ITERATIONS} прохода — сущность стоит на месте:
+     * нулевое смещение заведомо никуда не заводит.
+     *
+     * @param stepHeight высота «ступеньки» сущности (как {@code maxUpStep} в Minecraft), 0 — не шагает
+     * @param onGround   сущность стоит на опоре (подъём на ступеньку разрешён только так, как в ванили)
+     */
+    public static Resolution resolve(Vec3d boxMin, Vec3d boxMax, Vec3d movement, List<Ship> ships,
+                                     WorldClipper world, double stepHeight, boolean onGround) {
+        Vec3d v = movement;
+        int landedOn = -1;
+        boolean changed = false;
+        for (int iter = 0; iter < MAX_RESOLVE_ITERATIONS; iter++) {
+            Vec3d before = v;
+            boolean blocked = false;
+            for (int s = 0; s < ships.size(); s++) {
+                Ship ship = ships.get(s);
+                // ступенька — только в первом проходе: если блоки её срезали (низкий потолок), второй раз не пробуем
+                Result r = collideWorld(boxMin, boxMax, v, ship.position(), ship.rotation(), ship.shapes(),
+                        iter == 0 ? stepHeight : 0, onGround || landedOn >= 0);
+                if (!r.blocked()) continue;
+                blocked = true;
+                v = r.movement();
+                if (r.landed()) landedOn = s;
+            }
+            if (!blocked) return new Resolution(v, landedOn, changed);
+            changed = true;
+            v = world.clip(boxMin, boxMax, v);
+            if (same(v, before)) return new Resolution(v, landedOn, true);
+        }
+        return new Resolution(Vec3d.ZERO, landedOn, true);
+    }
+
+    private static boolean same(Vec3d a, Vec3d b) {
+        return Math.abs(a.x() - b.x()) < 1e-12 && Math.abs(a.y() - b.y()) < 1e-12 && Math.abs(a.z() - b.z()) < 1e-12;
+    }
+
+    /**
+     * Опирается ли что-то из деталей на область {@code probe} (мировой AABB) — для проверки «можно ли упасть»
+     * при ходьбе с Shift (ТЗ 12.2, ревью 2, №4). Касание гранью опорой не считается.
+     */
+    public static boolean supports(Vec3d probeMin, Vec3d probeMax, List<Ship> ships) {
+        Vec3d lo = probeMin.add(1e-6, 1e-6, 1e-6), hi = probeMax.sub(new Vec3d(1e-6, 1e-6, 1e-6));
+        for (Ship ship : ships) {
+            for (OrientedBox s : ship.shapes()) {
+                if (s.transformed(ship.position(), ship.rotation()).intersectsAabb(lo, hi)) return true;
+            }
+        }
+        return false;
+    }
+
     // ------------------------------------------------------------------ мировые координаты
+
+    public static Result collideWorld(Vec3d boxMin, Vec3d boxMax, Vec3d movement,
+                                      Vec3d shipPosition, Quat shipRotation, List<OrientedBox> hullShapes) {
+        return collideWorld(boxMin, boxMax, movement, shipPosition, shipRotation, hullShapes, 0, false);
+    }
 
     /**
      * @param boxMin       коробка сущности в мире
@@ -48,9 +136,12 @@ public final class HullCollider {
      * @param shipPosition начало локальных координат корпуса в мире
      * @param shipRotation ориентация корпуса
      * @param hullShapes   формы деталей в локальных координатах (используются их осевые границы)
+     * @param stepHeight   ступенька (подъём по оси «вверх» корпуса), 0 — без неё
+     * @param onGround     сущность стоит на опоре
      */
     public static Result collideWorld(Vec3d boxMin, Vec3d boxMax, Vec3d movement,
-                                      Vec3d shipPosition, Quat shipRotation, List<OrientedBox> hullShapes) {
+                                      Vec3d shipPosition, Quat shipRotation, List<OrientedBox> hullShapes,
+                                      double stepHeight, boolean onGround) {
         Vec3d center = boxMin.add(boxMax).scale(0.5);
         Vec3d half = boxMax.sub(boxMin).scale(0.5);
         Quat inv = shipRotation.conjugate();
@@ -65,7 +156,7 @@ public final class HullCollider {
             localMove = new Vec3d(walk.x(), walk.y() + movement.y(), walk.z());
         }
 
-        Result local = collideLocal(localBox, localMove, hullShapes);
+        Result local = collideLocal(localBox, localMove, hullShapes, stepHeight, onGround);
         if (!local.blocked()) return new Result(movement, false, false);
         Vec3d world = shipRotation.rotate(local.movement());
         // Убираем шум преобразования по осям, которые деталь не трогала (корабль не повёрнут — частый случай).
@@ -78,6 +169,36 @@ public final class HullCollider {
     }
 
     // ------------------------------------------------------------------ локальные координаты
+
+    /**
+     * Как {@link #collideLocal(Aabb, Vec3d, List)}, плюс «ступенька» (наблюдение владельца: с нижней поперечины
+     * кольца на настил киля — 25 см — приходилось прыгать). Как в ванили: если ход по горизонтали упёрся в деталь,
+     * а сущность стоит на опоре, пробуем подняться не выше {@code stepHeight}, пройти по горизонтали и опуститься
+     * обратно; берём этот вариант, если по горизонтали прошли дальше.
+     */
+    public static Result collideLocal(Aabb box, Vec3d move, List<OrientedBox> shapes, double stepHeight, boolean onGround) {
+        Result plain = collideLocal(box, move, shapes);
+        if (stepHeight <= 0) return plain;
+        Vec3d p = plain.movement();
+        boolean horizontalBlocked = p.x() != move.x() || p.z() != move.z();
+        if (!horizontalBlocked || !(onGround || plain.landed())) return plain;
+
+        double baseY = plain.landed() ? p.y() : 0;
+        Aabb b = box.move(new Vec3d(0, baseY, 0));
+        double up = clipAxis(b, 1, stepHeight, shapes);
+        if (up <= EPS) return plain;
+        b = b.move(new Vec3d(0, up, 0));
+        double[] d = {move.x(), 0, move.z()};
+        int[] order = Math.abs(d[0]) < Math.abs(d[2]) ? new int[]{2, 0} : new int[]{0, 2};
+        for (int axis : order) {
+            if (d[axis] == 0) continue;
+            d[axis] = clipAxis(b, axis, d[axis], shapes);
+            b = b.move(axisVector(axis, d[axis]));
+        }
+        if (d[0] * d[0] + d[2] * d[2] <= p.x() * p.x() + p.z() * p.z() + 1e-12) return plain;
+        double down = clipAxis(b, 1, -up, shapes);
+        return new Result(new Vec3d(d[0], baseY + up + down, d[2]), down > -up, true);
+    }
 
     /** Обрезать смещение коробки {@code box} о формы корпуса. Всё — в локальных координатах корпуса. */
     public static Result collideLocal(Aabb box, Vec3d move, List<OrientedBox> shapes) {

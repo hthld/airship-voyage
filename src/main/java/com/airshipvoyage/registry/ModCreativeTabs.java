@@ -18,8 +18,10 @@ public final class ModCreativeTabs {
                     .icon(() -> new ItemStack(ModItems.BLUEPRINT_TABLE.get()))
                     .displayItems((params, output) -> {
                         output.accept(ModItems.BLUEPRINT_TABLE.get());
-                        output.accept(ModItems.TRUSS_SECTION.get());
+                        output.accept(ModItems.PROTOTYPE_BLUEPRINT.get());
                         output.accept(ModItems.RING_SEGMENT.get());
+                        output.accept(ModItems.KEEL_SECTION.get());
+                        output.accept(ModItems.TRUSS_SECTION.get());
                         output.accept(ModItems.FOLDED_GAS_CELL.get());
                     })
                     .build());

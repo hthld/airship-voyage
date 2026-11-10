@@ -1,6 +1,10 @@
 package com.airshipvoyage.client;
 
 import com.airshipvoyage.AirshipVoyage;
+import com.airshipvoyage.assembly.ShipPartItem;
+import com.airshipvoyage.core.assembly.AssemblyPlan;
+import com.airshipvoyage.core.assembly.AssemblyTargeting;
+import com.airshipvoyage.core.assembly.ConstructionState;
 import com.airshipvoyage.core.math.OrientedBox;
 import com.airshipvoyage.core.math.Quat;
 import com.airshipvoyage.core.math.Vec3d;
@@ -9,6 +13,7 @@ import com.airshipvoyage.core.structure.ShipLayout;
 import com.airshipvoyage.physics.AirshipEntity;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.client.renderer.culling.Frustum;
@@ -16,6 +21,9 @@ import net.minecraft.client.renderer.entity.EntityRenderer;
 import net.minecraft.client.renderer.entity.EntityRendererProvider;
 import net.minecraft.client.renderer.texture.OverlayTexture;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.phys.Vec3;
 import org.joml.Quaternionf;
 
 import java.util.HashMap;
@@ -64,16 +72,73 @@ public class AirshipRenderer extends EntityRenderer<AirshipEntity> {
         pose.mulPose(new Quaternionf((float) q.x(), (float) q.y(), (float) q.z(), (float) q.w()));
 
         PoseStack.Pose last = pose.last();
-        for (PartInstance part : layout.parts()) {
-            ResourceLocation tex = textures.computeIfAbsent(part.type().material(), AirshipRenderer::texture);
-            VertexConsumer vc = buffers.getBuffer(RenderType.entityCutout(tex));
+        for (PartInstance part : ship.visibleParts()) {
+            VertexConsumer vc = buffers.getBuffer(RenderType.entityCutout(materialTexture(part.type().material())));
             for (OrientedBox box : part.hullShapes()) {
                 drawBox(last, vc, box, packedLight, 0xFFFFFFFF);
             }
         }
         drawCells(ship, last, buffers, packedLight);
+        if (ship.isUnderConstruction()) drawGhosts(ship, partialTick, last, buffers, packedLight);
         pose.popPose();
         super.render(ship, entityYaw, partialTick, pose, buffers, packedLight);
+    }
+
+    private ResourceLocation materialTexture(String material) {
+        return textures.computeIfAbsent(material, AirshipRenderer::texture);
+    }
+
+    /** На каком расстоянии видны контуры ещё не установленных деталей без детали в руке (ТЗ, 4.3). */
+    private static final double GHOST_NEAR = 8.0;
+    /** С подходящей деталью в руке — контуры мест, куда её можно поставить, видны дальше. */
+    private static final double GHOST_MATCHING = 32.0;
+
+    /**
+     * «Призраки» стройки (ТЗ 4.3, 5.2): не весь корабль голограммой, а ближайшие неустановленные детали.
+     * Бледно-белые — рядом с игроком; голубые — куда можно поставить деталь из руки; зелёный — выбранное
+     * взглядом место в пределах досягаемости; красный — выбрано, но опоры ещё не готовы.
+     */
+    private void drawGhosts(AirshipEntity ship, float partialTick, PoseStack.Pose pose, MultiBufferSource buffers, int light) {
+        Player player = Minecraft.getInstance().player;
+        ConstructionState state = ship.construction();
+        if (player == null || state == null) return;
+        String held = heldPartKey(player);
+        Vec3 sp = ship.getPosition(partialTick);
+        Vec3d shipPos = new Vec3d(sp.x, sp.y, sp.z);
+        Quat rot = ship.renderOrientation(partialTick);
+        Vec3 eye = player.getEyePosition(partialTick), look = player.getViewVector(partialTick);
+        Vec3 feet = player.getPosition(partialTick);
+        String targeted = held == null ? null : AssemblyTargeting.find(state, shipPos, rot,
+                        new Vec3d(eye.x, eye.y, eye.z), new Vec3d(look.x, look.y, look.z).normalized(),
+                        player.blockInteractionRange(), held)
+                .map(t -> t.step().slot()).orElse(null);
+
+        AssemblyPlan plan = state.plan();
+        for (AssemblyPlan.Step step : plan.steps()) {
+            if (state.isInstalled(step.slot())) continue;
+            boolean ready = state.installed().containsAll(step.requires());
+            boolean matches = step.itemKey().equals(held);
+            double d = AssemblyTargeting.distanceTo(plan, step.slot(), shipPos, rot, new Vec3d(feet.x, feet.y + 1, feet.z));
+            int color;
+            if (step.slot().equals(targeted)) color = ready ? 0xA060FF60 : 0xA0FF5050;
+            else if (matches && ready && d <= GHOST_MATCHING) color = 0x7070B8FF;
+            else if (d <= GHOST_NEAR) color = 0x38FFFFFF;
+            else continue;
+
+            ResourceLocation tex = step.kind() == AssemblyPlan.Kind.CELL ? CELL_TEXTURE
+                    : materialTexture(plan.part(step.slot()).type().material());
+            VertexConsumer vc = buffers.getBuffer(RenderType.entityTranslucent(tex));
+            // чуть больше настоящей детали — чтобы не мерцать на гранях соседних установленных
+            for (OrientedBox b : plan.shapesOf(step.slot())) drawBox(pose, vc, b.inflated(0.02), light, color);
+        }
+    }
+
+    /** Ключ монтажной единицы в руке (основная рука приоритетнее), null — если в руках не деталь. */
+    private static String heldPartKey(Player player) {
+        for (InteractionHand hand : InteractionHand.values()) {
+            if (player.getItemInHand(hand).getItem() instanceof ShipPartItem part) return part.partKey();
+        }
+        return null;
     }
 
     /**
@@ -87,6 +152,7 @@ public class AirshipRenderer extends EntityRenderer<AirshipEntity> {
         boolean[] leak = ship.cellLeakingForRender();
         VertexConsumer vc = buffers.getBuffer(RenderType.entityTranslucent(CELL_TEXTURE));
         for (int i = 0; i < cells.size() && i < fill.length; i++) {
+            if (!ship.cellPresent(i)) continue; // стройка: мешок ещё не подвешен
             OrientedBox bay = cells.get(i).bay();
             Vec3d h = bay.halfExtents();
             double f = Math.max(0.04, Math.min(1.0, fill[i]));

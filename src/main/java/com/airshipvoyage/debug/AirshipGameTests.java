@@ -418,5 +418,251 @@ public final class AirshipGameTests {
         h.succeed();
     }
 
+    // ------------------------------------------------------------------ шаг 5: строительство (ТЗ 25.2, п. 1–4)
+
+    /** Блок пола под центром дока — сюда «щёлкает» чертёж; низ корпуса ложится на его верхнюю грань. */
+    private static net.minecraft.core.BlockPos dockAnchor(GameTestHelper h) {
+        var c = net.minecraft.core.BlockPos.containing(h.absoluteVec(new Vec3(14, 2, 14)));
+        return new net.minecraft.core.BlockPos(c.getX(), (int) Math.round(floorY(h)) - 1, c.getZ());
+    }
+
+    /** Строительный проект прототипа носом на восток посреди дока. */
+    private static AirshipEntity spawnSite(GameTestHelper h) {
+        var plan = com.airshipvoyage.core.assembly.AssemblyPlans.prototype();
+        var aim = com.airshipvoyage.assembly.ConstructionSites.check(h.getLevel(), plan, dockAnchor(h), 0);
+        h.assertTrue(aim.result().ok(), "dock site rejected: " + aim.result());
+        return com.airshipvoyage.assembly.ConstructionSites.spawnSite(h.getLevel(), plan, aim.placement());
+    }
+
+    private static net.minecraft.core.BlockPos blockAtLocal(AirshipEntity ship, double x, double y, double z) {
+        Vec3d w = ship.body().localToWorld(new Vec3d(x, y, z));
+        return net.minecraft.core.BlockPos.containing(w.x(), w.y(), w.z());
+    }
+
+    /** Площадка (ТЗ 4.2): ровный пол подходит; блок в объёме или яма под кольцом — нет. */
+    @GameTest(template = TEMPLATE)
+    public static void siteCheckFindsObstaclesAndMissingSupport(GameTestHelper h) {
+        var plan = com.airshipvoyage.core.assembly.AssemblyPlans.prototype();
+        var anchor = dockAnchor(h);
+        var ok = com.airshipvoyage.assembly.ConstructionSites.check(h.getLevel(), plan, anchor, 0);
+        h.assertTrue(ok.result().ok(), "flat dock floor rejected: " + ok.result());
+        h.assertTrue(ok.result().supports() == 39, "support columns " + ok.result().supports());
+
+        var stone = net.minecraft.world.level.block.Blocks.STONE.defaultBlockState();
+        var air = net.minecraft.world.level.block.Blocks.AIR.defaultBlockState();
+        var inside = anchor.offset(-4, 3, 2);
+        h.getLevel().setBlockAndUpdate(inside, stone);
+        var blocked = com.airshipvoyage.assembly.ConstructionSites.check(h.getLevel(), plan, anchor, 0).result();
+        h.assertTrue(blocked.problem() == com.airshipvoyage.core.assembly.SiteCheck.Problem.OBSTRUCTED
+                && blocked.x() == inside.getX() && blocked.y() == inside.getY() && blocked.z() == inside.getZ(),
+                "obstacle not found: " + blocked);
+        h.getLevel().setBlockAndUpdate(inside, air);
+
+        // носовое кольцо — на x = anchor + 10 (центр блока + 10 м); убираем под ним блок пола
+        var underRing = anchor.offset(10, 0, 3);
+        h.getLevel().setBlockAndUpdate(underRing, air);
+        var hole = com.airshipvoyage.assembly.ConstructionSites.check(h.getLevel(), plan, anchor, 0).result();
+        h.assertTrue(hole.problem() == com.airshipvoyage.core.assembly.SiteCheck.Problem.NO_SUPPORT
+                && hole.x() == underRing.getX() && hole.z() == underRing.getZ() && hole.unsupported() == 1,
+                "missing support not found: " + hole);
+        // яма между кольцами не мешает
+        h.getLevel().setBlockAndUpdate(underRing, stone);
+        h.getLevel().setBlockAndUpdate(anchor.offset(5, 0, 0), air);
+        h.assertTrue(com.airshipvoyage.assembly.ConstructionSites.check(h.getLevel(), plan, anchor, 0).result().ok(),
+                "a hole between the rings should not matter");
+        h.succeed();
+    }
+
+    /** Игрок-заглушка с глазами в {@code eye}, смотрящий на {@code at} (оба — мировые). */
+    private static net.minecraft.world.entity.player.Player aimPlayer(net.minecraft.world.entity.player.Player p, Vec3d eye, Vec3d at) {
+        Vec3d d = at.sub(eye).normalized();
+        p.setPos(eye.x(), eye.y() - p.getEyeHeight(), eye.z());
+        p.setYRot((float) Math.toDegrees(-Math.atan2(d.x(), d.z())));
+        p.setXRot((float) Math.toDegrees(-Math.asin(d.y())));
+        return p;
+    }
+
+    /** ПКМ деталью {@code stack}, глядя из локальной точки {@code eyeLocal} в {@code atLocal}. */
+    private static com.airshipvoyage.assembly.ConstructionSites.InstallResult use(
+            GameTestHelper h, AirshipEntity ship, net.minecraft.world.entity.player.Player p,
+            net.minecraft.world.item.ItemStack stack, Vec3d eyeLocal, Vec3d atLocal) {
+        aimPlayer(p, ship.body().localToWorld(eyeLocal), ship.body().localToWorld(atLocal));
+        p.setItemInHand(net.minecraft.world.InteractionHand.MAIN_HAND, stack);
+        var item = (com.airshipvoyage.assembly.ShipPartItem) stack.getItem();
+        return com.airshipvoyage.assembly.ConstructionSites.tryInstall(h.getLevel(), p, stack, item.partKey());
+    }
+
+    private static void expect(GameTestHelper h, com.airshipvoyage.assembly.ConstructionSites.InstallResult r,
+                               com.airshipvoyage.assembly.ConstructionSites.Outcome o, String what) {
+        h.assertTrue(r.outcome() == o, what + ": expected " + o + ", got " + r);
+    }
+
+    /**
+     * Монтаж руками (ТЗ 5.2, 25.2 п. 2–3): порядок опор, перекрытый доступ, занятое место, расход предметов;
+     * установленная деталь сразу держит стоящих, неустановленная — нет.
+     */
+    @GameTest(template = TEMPLATE, timeoutTicks = 300)
+    public static void partsInstallInOrderAndCarryWalkers(GameTestHelper h) {
+        AirshipEntity ship = spawnSite(h);
+        var player = h.makeMockPlayer(net.minecraft.world.level.GameType.SURVIVAL);
+        var rings = new net.minecraft.world.item.ItemStack(com.airshipvoyage.registry.ModItems.RING_SEGMENT.get(), 3);
+        var keel = new net.minecraft.world.item.ItemStack(com.airshipvoyage.registry.ModItems.KEEL_SECTION.get(), 1);
+        var girders = new net.minecraft.world.item.ItemStack(com.airshipvoyage.registry.ModItems.TRUSS_SECTION.get(), 4);
+        var cells = new net.minecraft.world.item.ItemStack(com.airshipvoyage.registry.ModItems.FOLDED_GAS_CELL.get(), 2);
+        // сверху на киль (верх настила y = −5,25): 3,25 м — в пределах досягаемости 4,5
+        Vec3d keelEye = new Vec3d(2, -2, 0), keelAt = new Vec3d(2, -5.4, 0);
+        var stone = net.minecraft.world.level.block.Blocks.STONE.defaultBlockState();
+        var air = net.minecraft.world.level.block.Blocks.AIR.defaultBlockState();
+        net.minecraft.world.entity.decoration.ArmorStand[] stands = new net.minecraft.world.entity.decoration.ArmorStand[2];
+
+        onShipTicks(h, ship, new java.util.TreeMap<>(java.util.Map.of(
+                1, () -> {
+                    expect(h, use(h, ship, player, keel, keelEye, keelAt),
+                            com.airshipvoyage.assembly.ConstructionSites.Outcome.MISSING_SUPPORT, "keel before rings");
+                    h.assertTrue(keel.getCount() == 1, "refused keel was consumed");
+                    // до досягаемости не дотянуться: кольцо сверху с 10 м
+                    expect(h, use(h, ship, player, rings, new Vec3d(-10, 16, 0), new Vec3d(-10, 5.9, 0)),
+                            com.airshipvoyage.assembly.ConstructionSites.Outcome.NO_TARGET, "ring out of reach");
+                    // доступ перекрыт: камень между глазами и верхней поперечиной носового кольца
+                    var lid = blockAtLocal(ship, 10, 7, 0);
+                    h.getLevel().setBlockAndUpdate(lid, stone);
+                    expect(h, use(h, ship, player, rings, new Vec3d(10, 8.9, 0), new Vec3d(10, 5.9, 0)),
+                            com.airshipvoyage.assembly.ConstructionSites.Outcome.VIEW_BLOCKED, "ring behind a block");
+                    h.getLevel().setBlockAndUpdate(lid, air);
+                    for (double x : new double[]{-10, 0, 10}) {
+                        var r = use(h, ship, player, rings, new Vec3d(x, 8, 0), new Vec3d(x, 5.9, 0));
+                        h.assertTrue(r.outcome() == com.airshipvoyage.assembly.ConstructionSites.Outcome.INSTALLED, "ring at " + x + ": " + r);
+                    }
+                    h.assertTrue(rings.isEmpty(), "rings not consumed: " + rings.getCount());
+                    h.assertTrue(ship.hullShapes().size() == 12, "ring shapes " + ship.hullShapes().size());
+                    // стойка там, где будет киль, — падает на пол сквозь место киля
+                    stands[0] = dropOnLocal(h, ship, 3, -4.5, 0.5);
+                },
+                30, () -> {
+                    double y = localOf(ship, stands[0]).y();
+                    h.assertTrue(Math.abs(y + 6) < 0.01, "stand should fall through the empty keel slot to the floor, local y " + y);
+                    expect(h, use(h, ship, player, keel, keelEye, keelAt),
+                            com.airshipvoyage.assembly.ConstructionSites.Outcome.OCCUPIED_BY_ENTITY, "keel through a standing entity");
+                    stands[0].discard();
+                    // блок в объёме киля (первый слой над полом)
+                    var inKeel = blockAtLocal(ship, 6, -5.4, 0);
+                    h.getLevel().setBlockAndUpdate(inKeel, stone);
+                    expect(h, use(h, ship, player, keel, keelEye, keelAt),
+                            com.airshipvoyage.assembly.ConstructionSites.Outcome.OCCUPIED_BY_BLOCK, "keel through a block");
+                    h.getLevel().setBlockAndUpdate(inKeel, air);
+                    expect(h, use(h, ship, player, keel, keelEye, keelAt),
+                            com.airshipvoyage.assembly.ConstructionSites.Outcome.INSTALLED, "keel");
+                    h.assertTrue(keel.isEmpty(), "keel not consumed");
+                    stands[1] = dropOnLocal(h, ship, 3, -4.5, 0);
+                },
+                60, () -> {
+                    double y = localOf(ship, stands[1]).y();
+                    h.assertTrue(Math.abs(y + 5.25) < 1e-3 && stands[1].onGround(), "not standing on the new keel, local y " + y);
+                    AirshipVoyage.LOGGER.info("[test] stand on the freshly installed keel at local y {}", y);
+                    stands[1].discard(); // голова стойки в 2,5 см от низа отсеков мешков — не будем на это полагаться
+                    // мешок без верхних ферм — нельзя
+                    expect(h, use(h, ship, player, cells, new Vec3d(-5, 1, 0), new Vec3d(-5, 0, 0)),
+                            com.airshipvoyage.assembly.ConstructionSites.Outcome.MISSING_SUPPORT, "cell before top girders");
+                    // верхние фермы — сверху снаружи корпуса, нижние — сверху изнутри (с высоты 2,5 м над ними)
+                    for (double z : new double[]{-5.75, 5.75}) {
+                        expect(h, use(h, ship, player, girders, new Vec3d(3, 8, z), new Vec3d(3, 5.9, z)),
+                                com.airshipvoyage.assembly.ConstructionSites.Outcome.INSTALLED, "top girder " + z);
+                        expect(h, use(h, ship, player, girders, new Vec3d(3, -3, z), new Vec3d(3, -5.6, z)),
+                                com.airshipvoyage.assembly.ConstructionSites.Outcome.INSTALLED, "bottom girder " + z);
+                    }
+                    expect(h, use(h, ship, player, cells, new Vec3d(-5, 1, 0), new Vec3d(-5, 0, 0)),
+                            com.airshipvoyage.assembly.ConstructionSites.Outcome.INSTALLED, "aft cell");
+                    expect(h, use(h, ship, player, cells, new Vec3d(5, 1, 0), new Vec3d(5, 0, 0)),
+                            com.airshipvoyage.assembly.ConstructionSites.Outcome.COMPLETED, "forward cell");
+                    h.assertTrue(girders.isEmpty() && cells.isEmpty(), "parts not consumed");
+                    h.assertTrue(ship.construction().complete() && ship.isUnderConstruction(), "should wait for launch");
+                    h.assertTrue(ship.hullShapes().size() == 17, "shapes " + ship.hullShapes().size());
+                    h.succeed();
+                })));
+    }
+
+    /** Стойка в локальной точке (x, y, z) — падает сама. */
+    private static net.minecraft.world.entity.decoration.ArmorStand dropOnLocal(GameTestHelper h, AirshipEntity ship,
+                                                                                double x, double y, double z) {
+        Vec3d p = ship.body().localToWorld(new Vec3d(x, y, z));
+        var stand = new net.minecraft.world.entity.decoration.ArmorStand(h.getLevel(), p.x(), p.y(), p.z());
+        h.getLevel().addFreshEntity(stand);
+        return stand;
+    }
+
+    /** Прогресс стройки переживает сохранение мира (ТЗ, 4.4); у спущенного корабля стройки нет. */
+    @GameTest(template = TEMPLATE)
+    public static void constructionSurvivesSaveAndLoad(GameTestHelper h) {
+        AirshipEntity ship = spawnSite(h);
+        for (String r : java.util.List.of("ring_aft", "ring_mid", "ring_fwd")) {
+            h.assertTrue(ship.construction().install(r, com.airshipvoyage.core.assembly.AssemblyPlans.RING).ok(), r);
+        }
+        h.assertTrue(ship.construction().install("keel", com.airshipvoyage.core.assembly.AssemblyPlans.KEEL).ok(), "keel");
+        ship.constructionChanged();
+
+        CompoundTag tag = new CompoundTag();
+        ship.saveWithoutId(tag);
+        AirshipEntity copy = new AirshipEntity(ModEntities.AIRSHIP.get(), h.getLevel());
+        copy.load(tag);
+        h.assertTrue(copy.isUnderConstruction(), "construction lost");
+        h.assertTrue(copy.construction().installed().equals(ship.construction().installed()),
+                "installed " + copy.construction().installed());
+        h.assertTrue(copy.hullShapes().size() == 13, "collision shapes after load: " + copy.hullShapes().size());
+        h.assertTrue(copy.position().distanceTo(ship.position()) < 1e-9, "position lost");
+
+        ship.construction().installAll();
+        ship.launch();
+        CompoundTag tag2 = new CompoundTag();
+        ship.saveWithoutId(tag2);
+        AirshipEntity copy2 = new AirshipEntity(ModEntities.AIRSHIP.get(), h.getLevel());
+        copy2.load(tag2);
+        h.assertTrue(!copy2.isUnderConstruction() && copy2.hullShapes().size() == 17, "launched ship reloaded as a site");
+        ship.discard();
+        h.succeed();
+    }
+
+    /**
+     * Стройка неподвижна (физики нет, хотя газа нет и она тяжелее воздуха). После спуска (ТЗ 25.2, п. 4)
+     * корабль с пустыми мешками лежит на стапеле; наполнили газом на 95 % — поднимается.
+     * Число: 2 × 780 м³ × 0,95 × 1,14 кг/м³ ≈ 1690 кг подъёмной силы против ≈ 1400 кг — избыток ≈ 290 кг.
+     */
+    @GameTest(template = TEMPLATE, timeoutTicks = 400)
+    public static void siteStaysPutAndLaunchedShipRisesOnGas(GameTestHelper h) {
+        AirshipEntity ship = spawnSite(h);
+        Vec3d[] p0 = new Vec3d[1];
+        double[] y0 = new double[1];
+        onShipTicks(h, ship, new java.util.TreeMap<>(java.util.Map.of(
+                1, () -> p0[0] = posOf(ship),
+                40, () -> {
+                    h.assertTrue(posOf(ship).distanceTo(p0[0]) < 1e-9, "site moved");
+                    ship.construction().installAll();
+                    ship.constructionChanged();
+                    ship.launch();
+                    h.assertTrue(!ship.isUnderConstruction(), "not launched");
+                    h.assertTrue(ship.flight().fill(0, ship.environment()) < 1e-9, "cells should be empty after launch");
+                    y0[0] = ship.getY();
+                },
+                80, () -> {
+                    h.assertTrue(ship.flight().lastReport().grounded(), "launched ship should rest on the slipway");
+                    double sink = y0[0] - ship.getY();
+                    AirshipVoyage.LOGGER.info("[test] launched prototype with empty cells settled {} m on the slipway", String.format("%.4f", sink));
+                    h.assertTrue(sink >= 0 && sink < 0.05, "settled " + sink + " m");
+                    ship.flight().setFillAll(0.95, ship.environment());
+                },
+                120, () -> {
+                    double vy = ship.body().velocity().y();
+                    var bal = ship.flight().balance(ship.environment());
+                    AirshipVoyage.LOGGER.info("[test] launched prototype after 2 s on 95 % gas: rose {} m, vy {} m/s, mass {} kg, lift {} kg",
+                            String.format("%.3f", ship.getY() - y0[0]), String.format("%.3f", vy),
+                            String.format("%.0f", bal.massKg()), String.format("%.0f", bal.buoyancyKg()));
+                    h.assertTrue(vy > 0.3, "not rising on gas: vy " + vy);
+                    h.assertTrue(ship.getY() > y0[0] + 0.3, "rose only " + (ship.getY() - y0[0]));
+                    ship.discard();
+                    h.succeed();
+                })));
+    }
+
+    private static Vec3d posOf(Entity e) { return new Vec3d(e.getX(), e.getY(), e.getZ()); }
+
     private AirshipGameTests() {}
 }

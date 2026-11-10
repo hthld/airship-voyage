@@ -41,6 +41,42 @@ public record OrientedBox(Vec3d center, Vec3d halfExtents, Quat rotation) {
                 && Math.abs(local.z()) <= halfExtents.z() + eps;
     }
 
+    /** Та же коробка, увеличенная на {@code margin} с каждой стороны. */
+    public OrientedBox inflated(double margin) {
+        return new OrientedBox(center, halfExtents.add(margin, margin, margin), rotation);
+    }
+
+    /**
+     * Луч {@code origin + t·dir} (dir — единичный) против коробки, метод «плит» в осях коробки.
+     * Возвращает расстояние t ≥ 0 до входа в коробку (0, если начало внутри) или {@code NaN}, если промах.
+     * Нужен для выбора монтажной точки взглядом (ТЗ, 5.2).
+     */
+    public double rayHit(Vec3d origin, Vec3d dir) {
+        Vec3d o = rotation.inverseRotate(origin.sub(center));
+        Vec3d d = rotation.inverseRotate(dir);
+        double tMin = 0, tMax = Double.POSITIVE_INFINITY;
+        for (int a = 0; a < 3; a++) {
+            double h = halfExtents.get(a), oa = o.get(a), da = d.get(a);
+            if (Math.abs(da) < 1e-12) {
+                if (oa < -h || oa > h) return Double.NaN; // параллельно плите и вне её
+                continue;
+            }
+            double t1 = (-h - oa) / da, t2 = (h - oa) / da;
+            if (t1 > t2) { double s = t1; t1 = t2; t2 = s; }
+            tMin = Math.max(tMin, t1);
+            tMax = Math.min(tMax, t2);
+            if (tMin > tMax) return Double.NaN;
+        }
+        return tMin;
+    }
+
+    /** Расстояние от точки до коробки (0 внутри). */
+    public double distanceTo(Vec3d p) {
+        Vec3d l = rotation.inverseRotate(p.sub(center)).abs().sub(halfExtents);
+        Vec3d outside = new Vec3d(Math.max(l.x(), 0), Math.max(l.y(), 0), Math.max(l.z(), 0));
+        return outside.length();
+    }
+
     /**
      * Пересечение с осевым параллелепипедом [min, max] (теорема о разделяющей оси, 15 осей).
      * Используется на этапе точной проверки столкновений с блоками мира.

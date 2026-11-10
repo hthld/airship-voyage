@@ -3,13 +3,18 @@ package com.airshipvoyage.physics;
 import com.airshipvoyage.AirshipVoyage;
 import com.airshipvoyage.collision.ShipCollisions;
 import com.airshipvoyage.collision.ShipRegistry;
+import com.airshipvoyage.core.assembly.AssemblyPlan;
+import com.airshipvoyage.core.assembly.AssemblyPlans;
+import com.airshipvoyage.core.assembly.ConstructionState;
 import com.airshipvoyage.core.collision.HullCollider;
 import com.airshipvoyage.core.flight.FlightModel;
+import com.airshipvoyage.core.math.OrientedBox;
 import com.airshipvoyage.core.math.Quat;
 import com.airshipvoyage.core.math.Vec3d;
 import com.airshipvoyage.core.physics.GasCell;
 import com.airshipvoyage.core.physics.LiftingGas;
 import com.airshipvoyage.core.rigid.RigidBody;
+import com.airshipvoyage.core.structure.PartInstance;
 import com.airshipvoyage.core.structure.ShipLayout;
 import com.airshipvoyage.core.structure.ShipLayouts;
 import net.minecraft.nbt.CompoundTag;
@@ -25,6 +30,8 @@ import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.AABB;
 import org.joml.Quaternionf;
+
+import java.util.List;
 
 /**
  * Корабль в мире — одна серверная сущность (ARCHITECTURE.md, разд. 5).
@@ -43,6 +50,11 @@ import org.joml.Quaternionf;
  * <p>Шаг 3 прототипа: физику полёта ведёт {@link FlightModel} — вес, архимедова сила газовых камер,
  * балласт, утечки, контакт с блоками мира ({@link WorldEnvironment}). Наполнение и утечки камер
  * передаются клиентам для отрисовки мешков.
+ *
+ * <p>Шаг 5 прототипа (строительство, ТЗ 4–5): та же сущность служит строительным проектом «на стапеле»
+ * ({@link #isUnderConstruction()}): физика не считается, коллизию и вид дают только установленные детали
+ * ({@link ConstructionState}), прогресс сохраняется в NBT и передаётся клиентам. Спуск со стапеля ({@link #launch()})
+ * просто снимает режим стройки — тот же корабль начинает летать, стоящие на палубе остаются на ней.
  */
 public class AirshipEntity extends Entity {
     private static final EntityDataAccessor<String> DATA_LAYOUT =
@@ -51,6 +63,9 @@ public class AirshipEntity extends Entity {
             SynchedEntityData.defineId(AirshipEntity.class, EntityDataSerializers.QUATERNION);
     /** Наполнение и утечки камер для отрисовки: {"fill": [..], "leak": [..]}. */
     private static final EntityDataAccessor<CompoundTag> DATA_CELLS =
+            SynchedEntityData.defineId(AirshipEntity.class, EntityDataSerializers.COMPOUND_TAG);
+    /** Стройка: {"active": bool, "installed": [точки плана]}; пусто — корабль летает. */
+    private static final EntityDataAccessor<CompoundTag> DATA_CONSTRUCTION =
             SynchedEntityData.defineId(AirshipEntity.class, EntityDataSerializers.COMPOUND_TAG);
 
     private static final double DT = 1.0 / 20.0;
@@ -63,6 +78,14 @@ public class AirshipEntity extends Entity {
     // --- состояние камер для рендера (клиент) и для решения «пора ли отправить» (сервер) ---
     private float[] cellFill = new float[0];
     private boolean[] cellLeaking = new boolean[0];
+
+    /**
+     * Корабль на стапеле (ТЗ, 4.3–4.4, 5.2): физика не считается, коллизию и вид дают только установленные детали.
+     * {@code null} — корабль спущен и летает.
+     */
+    private ConstructionState construction;
+    /** Коллизия стройки, пересчитывается при каждой установке. */
+    private List<OrientedBox> constructionShapes = List.of();
 
     // --- клиентская интерполяция ориентации ---
     private Quat orientation = Quat.IDENTITY;
@@ -86,6 +109,69 @@ public class AirshipEntity extends Entity {
         builder.define(DATA_LAYOUT, ShipLayouts.defaultLayout().id());
         builder.define(DATA_ORIENTATION, new Quaternionf());
         builder.define(DATA_CELLS, new CompoundTag());
+        builder.define(DATA_CONSTRUCTION, new CompoundTag());
+    }
+
+    // ------------------------------------------------------------------ стройка (ТЗ, 4–5)
+
+    /** Сделать из корабля строительный проект по плану: ничего не установлено, физика стоит. */
+    public void startConstruction(AssemblyPlan plan) {
+        if (layout != plan.layout()) setLayout(plan.layout());
+        setConstruction(new ConstructionState(plan));
+    }
+
+    private void setConstruction(ConstructionState state) {
+        this.construction = state;
+        constructionChanged();
+    }
+
+    /** После установки детали: пересчитать коллизию и разослать клиентам. */
+    public void constructionChanged() {
+        constructionShapes = construction == null ? List.of() : List.copyOf(construction.installedShapes());
+        if (!level().isClientSide) {
+            CompoundTag tag = new CompoundTag();
+            if (construction != null) {
+                tag.putBoolean("active", true);
+                tag.put("installed", strings(construction.installed()));
+            }
+            entityData.set(DATA_CONSTRUCTION, tag);
+        }
+    }
+
+    public boolean isUnderConstruction() { return construction != null; }
+
+    /** Прогресс стройки (null у летающего корабля). */
+    public ConstructionState construction() { return construction; }
+
+    /**
+     * Спуск со стапеля (ТЗ 5.4, этап X): проект становится летающим кораблём. Мешки подвешены пустыми —
+     * газ закачивается отдельно (этап IX; пока — командой {@code /airship gas}). Корабль лежит на опорах.
+     */
+    public void launch() {
+        if (construction == null) return;
+        for (GasCell cell : flight.cells()) {
+            cell.setAmountMol(0);
+            cell.setLeakPerSecond(0);
+        }
+        flight.massChanged();
+        flight.place(new Vec3d(getX(), getY(), getZ()), flight.body().orientation());
+        setConstruction(null);
+        syncCells(true);
+    }
+
+    /** Коллизионные формы в локальных координатах корпуса: у стройки — только установленные детали. */
+    public List<OrientedBox> hullShapes() {
+        return construction != null ? constructionShapes : layout.hullShapes();
+    }
+
+    /** Детали для рендера: у стройки — только установленные. */
+    public List<PartInstance> visibleParts() {
+        return construction != null ? construction.installedParts() : layout.parts();
+    }
+
+    /** Камера {@code index} (по {@code layout().cells()}) подвешена — у стройки только установленные. */
+    public boolean cellPresent(int index) {
+        return construction == null || construction.isInstalled(layout.cells().get(index).id());
     }
 
     private void setLayout(ShipLayout newLayout) {
@@ -101,6 +187,7 @@ public class AirshipEntity extends Entity {
         } else {
             flight.place(new Vec3d(getX(), getY(), getZ()), Quat.IDENTITY);
         }
+        if (construction != null && construction.plan().layout() != newLayout) setConstruction(null);
         cellFill = new float[newLayout.cells().size()];
         cellLeaking = new boolean[newLayout.cells().size()];
         if (!level().isClientSide) {
@@ -206,9 +293,16 @@ public class AirshipEntity extends Entity {
         if (!level().isClientSide) return;
         if (DATA_LAYOUT.equals(key)) {
             ShipLayouts.byId(entityData.get(DATA_LAYOUT)).ifPresent(l -> {
-                this.layout = l;
+                if (l != this.layout) {
+                    this.layout = l;
+                    cellFill = new float[l.cells().size()];
+                    cellLeaking = new boolean[l.cells().size()];
+                }
+                applyConstructionTag();
                 reapplyPosition();
             });
+        } else if (DATA_CONSTRUCTION.equals(key)) {
+            applyConstructionTag();
         } else if (DATA_CELLS.equals(key)) {
             CompoundTag tag = entityData.get(DATA_CELLS);
             ListTag fills = tag.getList("fill", Tag.TAG_FLOAT), leaks = tag.getList("leak", Tag.TAG_BYTE);
@@ -229,6 +323,33 @@ public class AirshipEntity extends Entity {
         }
     }
 
+    /** Клиент: восстановить стройку из синхронизированных данных (план — по текущему типу корабля). */
+    private void applyConstructionTag() {
+        CompoundTag tag = entityData.get(DATA_CONSTRUCTION);
+        if (!tag.getBoolean("active") || layout == null) {
+            construction = null;
+            constructionShapes = List.of();
+            return;
+        }
+        AssemblyPlans.byLayoutId(layout.id()).ifPresentOrElse(plan -> {
+            construction = ConstructionState.restore(plan, readStrings(tag, "installed"));
+            constructionShapes = List.copyOf(construction.installedShapes());
+        }, () -> construction = null);
+    }
+
+    private static ListTag strings(java.util.Collection<String> values) {
+        ListTag list = new ListTag();
+        for (String s : values) list.add(net.minecraft.nbt.StringTag.valueOf(s));
+        return list;
+    }
+
+    private static List<String> readStrings(CompoundTag tag, String key) {
+        ListTag list = tag.getList(key, Tag.TAG_STRING);
+        List<String> out = new java.util.ArrayList<>(list.size());
+        for (int i = 0; i < list.size(); i++) out.add(list.getString(i));
+        return out;
+    }
+
     // ------------------------------------------------------------------ тик
 
     @Override
@@ -247,6 +368,12 @@ public class AirshipEntity extends Entity {
         Vec3d entityPos = new Vec3d(getX(), getY(), getZ());
         if (entityPos.distanceTo(body.position()) > 1e-6) body.setPosition(entityPos);
         Quat oldRot = body.orientation();
+        if (construction != null) {
+            // на стапеле корабль неподвижен: физика полёта не считается (ТЗ 5.4 — спуск только после постройки)
+            body.freeze();
+            setDeltaMovement(net.minecraft.world.phys.Vec3.ZERO);
+            return;
+        }
 
         try {
             flight.step(DT, environment());
@@ -412,6 +539,15 @@ public class AirshipEntity extends Entity {
         body.setVelocity(readVec(tag, "Velocity"));
         body.setAngularVelocity(readVec(tag, "AngularVelocity"));
         readFlightState(tag);
+        // стройка (ТЗ, 4.4): установленные детали остаются на местах после перезапуска мира
+        if (tag.contains("Construction", Tag.TAG_LIST)) {
+            List<String> installed = readStrings(tag, "Construction");
+            AssemblyPlans.byLayoutId(layout.id()).ifPresentOrElse(
+                    plan -> setConstruction(ConstructionState.restore(plan, installed)),
+                    () -> setConstruction(null));
+        } else if (construction != null) {
+            setConstruction(null);
+        }
         reapplyPosition();
         // Ревью №2: данные для клиентов должны совпадать с физикой сразу после загрузки,
         // а не после первого тика — корабль в неактивной зоне может долго не получать тиков.
@@ -465,6 +601,7 @@ public class AirshipEntity extends Entity {
     protected void addAdditionalSaveData(CompoundTag tag) {
         RigidBody body = flight.body();
         tag.putString("Layout", layout.id());
+        if (construction != null) tag.put("Construction", strings(construction.installed()));
         tag.putBoolean("Neutral", flight.neutral());
         ListTag cells = new ListTag();
         for (GasCell cell : flight.cells()) {

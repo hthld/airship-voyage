@@ -58,6 +58,10 @@ public final class ShipLayout {
      * вершины и точки на рёбрах каждой коробки не реже чем через {@code spacing} метров.
      * Совпадающие точки соседних деталей не дублируются.
      */
+    public static List<Vec3d> contactSamplesOf(List<OrientedBox> shapes, double spacing) {
+        return buildContactSamples(shapes, spacing);
+    }
+
     static List<Vec3d> buildContactSamples(List<OrientedBox> shapes, double spacing) {
         java.util.LinkedHashSet<Vec3d> out = new java.util.LinkedHashSet<>();
         int[][] edges = {{0, 1}, {2, 3}, {4, 5}, {6, 7}, {0, 2}, {1, 3}, {4, 6}, {5, 7}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};

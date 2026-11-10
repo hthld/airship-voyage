@@ -45,6 +45,9 @@ import java.util.Locale;
  * /airship damage &lt;камера&gt; &lt;%/мин&gt;    — пробоина: утечка газа, доля в минуту (ТЗ 25.2, п. 8)
  * /airship repair [камера]             — заделать пробоины
  * /airship neutral on|off              — отладка: отключить вес и подъёмную силу
+ *
+ * /airship build complete              — стройка: установить все оставшиеся детали
+ * /airship build launch                — стройка: спуск со стапеля законченного корабля
  * </pre>
  */
 public final class AirshipCommands {
@@ -57,6 +60,12 @@ public final class AirshipCommands {
             new SimpleCommandExceptionType(Component.translatable("commands.airshipvoyage.no_cells"));
     private static final SimpleCommandExceptionType UNKNOWN_CELL =
             new SimpleCommandExceptionType(Component.translatable("commands.airshipvoyage.unknown_cell"));
+    private static final SimpleCommandExceptionType NO_SITE =
+            new SimpleCommandExceptionType(Component.translatable("commands.airshipvoyage.no_site"));
+    private static final SimpleCommandExceptionType NOT_COMPLETE =
+            new SimpleCommandExceptionType(Component.translatable("commands.airshipvoyage.not_complete"));
+    private static final SimpleCommandExceptionType UNDER_CONSTRUCTION =
+            new SimpleCommandExceptionType(Component.translatable("commands.airshipvoyage.under_construction"));
 
     public static void register(RegisterCommandsEvent event) {
         register(event.getDispatcher());
@@ -115,6 +124,9 @@ public final class AirshipCommands {
                 .then(Commands.literal("neutral")
                         .then(Commands.literal("on").executes(c -> neutral(c, true)))
                         .then(Commands.literal("off").executes(c -> neutral(c, false))))
+                .then(Commands.literal("build")
+                        .then(Commands.literal("complete").executes(AirshipCommands::buildComplete))
+                        .then(Commands.literal("launch").executes(AirshipCommands::buildLaunch)))
                 .then(Commands.literal("stop").executes(AirshipCommands::stop))
                 .then(Commands.literal("info").executes(AirshipCommands::info))
                 .then(Commands.literal("remove").executes(AirshipCommands::remove)));
@@ -273,14 +285,22 @@ public final class AirshipCommands {
     }
 
     private static int remove(CommandContext<CommandSourceStack> c) throws CommandSyntaxException {
-        AirshipEntity ship = nearest(c.getSource());
+        AirshipEntity ship = nearestAny(c.getSource());
         ship.discard();
         c.getSource().sendSuccess(() -> Component.translatable("commands.airshipvoyage.removed"), true);
         return 1;
     }
 
     private static int info(CommandContext<CommandSourceStack> c) throws CommandSyntaxException {
-        AirshipEntity ship = nearest(c.getSource());
+        AirshipEntity ship = nearestAny(c.getSource());
+        if (ship.isUnderConstruction()) {
+            var s = ship.construction();
+            String text = String.format(Locale.ROOT, "%s · стройка: %d из %d · установлено: %s · можно ставить: %s",
+                    ship.layout().id(), s.installedCount(), s.totalCount(), String.join(", ", s.installed()),
+                    String.join(", ", s.available().stream().map(st -> st.slot() + " (" + st.itemKey() + ")").toList()));
+            c.getSource().sendSuccess(() -> Component.literal(text), false);
+            return 1;
+        }
         RigidBody b = ship.body();
         MassProperties mp = b.massProperties();
         Mat3 i = mp.inertia();
@@ -320,14 +340,49 @@ public final class AirshipCommands {
         return 1;
     }
 
+    /** Отладка стройки: установить все оставшиеся детали ближайшей стройки. */
+    private static int buildComplete(CommandContext<CommandSourceStack> c) throws CommandSyntaxException {
+        AirshipEntity ship = nearestSite(c.getSource());
+        ship.construction().installAll();
+        ship.constructionChanged();
+        c.getSource().sendSuccess(() -> Component.translatable("commands.airshipvoyage.build_completed"), false);
+        return 1;
+    }
+
+    /** Спуск со стапеля ближайшей законченной стройки — то же, что Shift+ПКМ чертежом. */
+    private static int buildLaunch(CommandContext<CommandSourceStack> c) throws CommandSyntaxException {
+        AirshipEntity ship = nearestSite(c.getSource());
+        if (!ship.construction().complete()) throw NOT_COMPLETE.create();
+        ship.launch();
+        c.getSource().sendSuccess(() -> Component.translatable("message.airshipvoyage.build.launched"), false);
+        return 1;
+    }
+
     // ------------------------------------------------------------------ служебное
 
-    private static AirshipEntity nearest(CommandSourceStack src) throws CommandSyntaxException {
+    /** Ближайший корабль, в том числе стройка (для info и remove). */
+    private static AirshipEntity nearestAny(CommandSourceStack src) throws CommandSyntaxException {
         Vec3 p = src.getPosition();
         return src.getLevel().getEntitiesOfClass(AirshipEntity.class, new AABB(p, p).inflate(SEARCH_RADIUS))
                 .stream()
                 .min(Comparator.comparingDouble(e -> e.distanceToSqr(p)))
                 .orElseThrow(NO_SHIP::create);
+    }
+
+    /** Ближайший корабль для команд полёта: стройку двигать и наполнять нельзя — физика у неё не считается. */
+    private static AirshipEntity nearest(CommandSourceStack src) throws CommandSyntaxException {
+        AirshipEntity ship = nearestAny(src);
+        if (ship.isUnderConstruction()) throw UNDER_CONSTRUCTION.create();
+        return ship;
+    }
+
+    private static AirshipEntity nearestSite(CommandSourceStack src) throws CommandSyntaxException {
+        Vec3 p = src.getPosition();
+        return src.getLevel().getEntitiesOfClass(AirshipEntity.class, new AABB(p, p).inflate(SEARCH_RADIUS),
+                        AirshipEntity::isUnderConstruction)
+                .stream()
+                .min(Comparator.comparingDouble(e -> e.distanceToSqr(p)))
+                .orElseThrow(NO_SITE::create);
     }
 
     private static AirshipEntity nearestWithCells(CommandSourceStack src) throws CommandSyntaxException {

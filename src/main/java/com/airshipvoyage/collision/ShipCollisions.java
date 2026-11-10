@@ -61,7 +61,7 @@ public final class ShipCollisions {
             Quat rot = ship.orientation();
             HullCollider.Result r = HullCollider.collideWorld(
                     new Vec3d(box.minX, box.minY, box.minZ), new Vec3d(box.maxX, box.maxY, box.maxZ),
-                    new Vec3d(result.x, result.y, result.z), pos, rot, ship.layout().hullShapes());
+                    new Vec3d(result.x, result.y, result.z), pos, rot, ship.hullShapes());
             if (!r.blocked()) continue;
             result = new Vec3(r.movement().x(), r.movement().y(), r.movement().z());
             if (r.landed()) markLanded(entity, ship);
@@ -120,7 +120,7 @@ public final class ShipCollisions {
             Vec3d h = new com.airshipvoyage.core.math.OrientedBox(Vec3d.ZERO,
                     new Vec3d(box.getXsize() / 2, box.getYsize() / 2, box.getZsize() / 2), inv).aabbHalfExtents();
             Vec3d lo = c.sub(h), hi = c.add(h);
-            for (var s : ship.layout().hullShapes()) {
+            for (var s : ship.hullShapes()) {
                 Vec3d sMin = s.aabbMin(), sMax = s.aabbMax();
                 if (lo.x() < sMax.x() && hi.x() > sMin.x() && lo.y() < sMax.y() && hi.y() > sMin.y()
                         && lo.z() < sMax.z() && hi.z() > sMin.z()) {

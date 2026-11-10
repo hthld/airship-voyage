@@ -413,8 +413,8 @@ public final class AirshipGameTests {
         }
         h.assertTrue(Math.abs(copy.flight().ballast().get(0).massKg() - ship.flight().ballast().get(0).massKg()) < 1e-9,
                 "ballast lost");
-        // балансировочный балласт носа 125,5 кг, сброшено 37
-        h.assertTrue(Math.abs(copy.flight().ballast().get(0).massKg() - 88.5) < 1e-6, "ballast " + copy.flight().ballast().get(0).massKg());
+        // балансировочный балласт носа 107,5 кг (со штурвальным постом), сброшено 37
+        h.assertTrue(Math.abs(copy.flight().ballast().get(0).massKg() - 70.5) < 1e-6, "ballast " + copy.flight().ballast().get(0).massKg());
         h.assertTrue(copy.flight().neutral(), "neutral flag lost");
         h.assertTrue(Math.abs(copy.body().massKg() - ship.body().massKg()) < 1e-6, "mass differs");
         ship.discard();
@@ -514,6 +514,7 @@ public final class AirshipGameTests {
         var cells = new net.minecraft.world.item.ItemStack(com.airshipvoyage.registry.ModItems.FOLDED_GAS_CELL.get(), 2);
         var engines = new net.minecraft.world.item.ItemStack(com.airshipvoyage.registry.ModItems.ENGINE_POD.get(), 2);
         var fins = new net.minecraft.world.item.ItemStack(com.airshipvoyage.registry.ModItems.TAIL_FIN.get(), 3);
+        var helm = new net.minecraft.world.item.ItemStack(com.airshipvoyage.registry.ModItems.HELM.get(), 1);
         // сверху на киль (верх настила y = −5,25): 3,25 м — в пределах досягаемости 4,5
         Vec3d keelEye = new Vec3d(2, -2, 0), keelAt = new Vec3d(2, -5.4, 0);
         var stone = net.minecraft.world.level.block.Blocks.STONE.defaultBlockState();
@@ -590,10 +591,14 @@ public final class AirshipGameTests {
                     expect(h, use(h, ship, player, fins, new Vec3d(-8.5, 1.5, -7.5), new Vec3d(-8.5, 0, -7.5)),
                             com.airshipvoyage.assembly.ConstructionSites.Outcome.INSTALLED, "port fin");
                     expect(h, use(h, ship, player, fins, new Vec3d(-8.5, 1.5, 7.5), new Vec3d(-8.5, 0, 7.5)),
-                            com.airshipvoyage.assembly.ConstructionSites.Outcome.COMPLETED, "starboard fin");
-                    h.assertTrue(girders.isEmpty() && cells.isEmpty() && engines.isEmpty() && fins.isEmpty(), "parts not consumed");
+                            com.airshipvoyage.assembly.ConstructionSites.Outcome.INSTALLED, "starboard fin");
+                    // штурвальный пост на носу киля (верх поста y = −4,15) — сверху, из-под отсека мешка (низ y = −3,25)
+                    expect(h, use(h, ship, player, helm, new Vec3d(9.6, -3.4, 0), new Vec3d(9.6, -4.3, 0)),
+                            com.airshipvoyage.assembly.ConstructionSites.Outcome.COMPLETED, "helm");
+                    h.assertTrue(girders.isEmpty() && cells.isEmpty() && engines.isEmpty() && fins.isEmpty() && helm.isEmpty(),
+                            "parts not consumed");
                     h.assertTrue(ship.construction().complete() && ship.isUnderConstruction(), "should wait for launch");
-                    h.assertTrue(ship.hullShapes().size() == 22, "shapes " + ship.hullShapes().size());
+                    h.assertTrue(ship.hullShapes().size() == 23, "shapes " + ship.hullShapes().size());
                     h.succeed();
                 })));
     }
@@ -633,7 +638,7 @@ public final class AirshipGameTests {
         ship.saveWithoutId(tag2);
         AirshipEntity copy2 = new AirshipEntity(ModEntities.AIRSHIP.get(), h.getLevel());
         copy2.load(tag2);
-        h.assertTrue(!copy2.isUnderConstruction() && copy2.hullShapes().size() == 22, "launched ship reloaded as a site");
+        h.assertTrue(!copy2.isUnderConstruction() && copy2.hullShapes().size() == 23, "launched ship reloaded as a site");
         ship.discard();
         h.succeed();
     }
@@ -758,6 +763,132 @@ public final class AirshipGameTests {
                 })));
     }
 
+    /**
+     * Аудит 3, AUD-03-02: сохранение прежней версии (до балансировочного балласта) — по 100 кг на носу и корме.
+     * Загрузка должна вернуть 100/100, а не 100/74,5 (раньше балласт восстанавливался «сбросом» от нового
+     * начального запаса, и 25,5 кг на корме пропадали).
+     */
+    @GameTest(template = DOCK)
+    public static void oldSaveBallastIsRestoredExactly(GameTestHelper h) {
+        AirshipEntity ship = spawnFlyingShip(h, 12);
+        CompoundTag tag = new CompoundTag();
+        ship.saveWithoutId(tag);
+        net.minecraft.nbt.ListTag old = new net.minecraft.nbt.ListTag();
+        for (String id : java.util.List.of("fwd", "aft")) {
+            CompoundTag b = new CompoundTag();
+            b.putString("Id", id);
+            b.putDouble("Kg", 100);
+            old.add(b);
+        }
+        tag.put("Ballast", old);
+        AirshipEntity copy = new AirshipEntity(ModEntities.AIRSHIP.get(), h.getLevel());
+        copy.load(tag);
+        double fwd = copy.flight().ballast().get(0).massKg(), aft = copy.flight().ballast().get(1).massKg();
+        AirshipVoyage.LOGGER.info("[test] old save ballast restored: fwd {} kg, aft {} kg", fwd, aft);
+        h.assertTrue(Math.abs(fwd - 100) < 1e-9 && Math.abs(aft - 100) < 1e-9, "ballast " + fwd + " / " + aft);
+        ship.discard();
+        h.succeed();
+    }
+
+    // ------------------------------------------------------------------ AV-013: штурвальный пост, AV-014: люди на борту
+
+    /** Игрок-«макет» в локальной точке корабля (ступни). В мире его нет — getPlayerByUUID его не найдёт. */
+    private static net.minecraft.world.entity.player.Player playerAtLocal(GameTestHelper h, AirshipEntity ship,
+                                                                         double x, double y, double z) {
+        var p = h.makeMockPlayer(net.minecraft.world.level.GameType.SURVIVAL);
+        Vec3d w = ship.body().localToWorld(new Vec3d(x, y, z));
+        p.setPos(w.x(), w.y(), w.z());
+        return p;
+    }
+
+    /**
+     * Пост управления (ТЗ 9.1–9.2): встал рядом — принят; далеко — нет; команды принимаются только от стоящего
+     * у штурвала: две ступени телеграфа вперёд от «стоп» — «средний», рули, газ, сброс балласта поровну
+     * (10 кг: по 5 из носового 107,5 и кормового 92,5 — дифферент не меняется). Отошёл — рули и клапаны в ноль,
+     * телеграф остаётся. Игрок пропал из мира — сервер снимает его с поста сам.
+     */
+    @GameTest(template = DOCK, batch = "helm")
+    public static void helmTakesCommandsAndReleases(GameTestHelper h) {
+        AirshipEntity ship = spawnFlyingShip(h, 12);
+        var flight = ship.flight();
+        // ступни на настиле киля в 1,1 м за постом (пост x 9,3…9,9): от глаз до поста ≈ 1,1 м
+        var pilot = playerAtLocal(h, ship, 8.2, PrototypeShip.DECK_TOP, 0);
+        var far = playerAtLocal(h, ship, -5, PrototypeShip.DECK_TOP, 0);
+        h.assertTrue(com.airshipvoyage.control.HelmService.take(far, ship) == com.airshipvoyage.control.HelmService.Result.TOO_FAR,
+                "far player took the helm");
+        h.assertTrue(com.airshipvoyage.control.HelmService.take(pilot, ship) == com.airshipvoyage.control.HelmService.Result.TAKEN,
+                "pilot refused");
+        h.assertTrue(ship.isHelmsman(pilot) && !ship.isHelmsman(far), "wrong helmsman");
+        h.assertTrue("stop".equals(ship.hud().getString("tg")), "hud not synced: " + ship.hud());
+        h.assertTrue(!com.airshipvoyage.control.HelmService.apply(far, ship, 1, 25, 0, false, false), "far player commanded");
+        h.assertTrue(flight.engines().get(0).telegraph() == com.airshipvoyage.core.propulsion.Telegraph.STOP, "far command applied");
+
+        com.airshipvoyage.control.HelmService.apply(pilot, ship, 1, 0, 0, false, false);
+        com.airshipvoyage.control.HelmService.apply(pilot, ship, 1, -25, 15, true, true);
+        for (var e : flight.engines()) {
+            h.assertTrue(e.telegraph() == com.airshipvoyage.core.propulsion.Telegraph.HALF, e.id() + " " + e.telegraph());
+        }
+        h.assertTrue(flight.rudderCommandDeg() == -25 && flight.elevatorCommandDeg() == 15, "rudders not applied");
+        h.assertTrue(flight.venting(), "valves not opened");
+        double fwd = flight.ballast().get(0).massKg(), aft = flight.ballast().get(1).massKg();
+        AirshipVoyage.LOGGER.info("[test] helm: telegraph {}, rudder {}, elevator {}, ballast {} / {} kg",
+                flight.engines().get(0).telegraph(), flight.rudderCommandDeg(), flight.elevatorCommandDeg(), fwd, aft);
+        h.assertTrue(Math.abs(fwd - 102.5) < 1e-9 && Math.abs(aft - 87.5) < 1e-9, "ballast " + fwd + " / " + aft);
+
+        com.airshipvoyage.control.HelmService.leave(pilot, ship);
+        h.assertTrue(ship.helmsman() == null, "still at the helm");
+        h.assertTrue(flight.rudderCommandDeg() == 0 && flight.elevatorCommandDeg() == 0 && !flight.venting(), "controls not reset");
+        h.assertTrue(flight.engines().get(0).telegraph() == com.airshipvoyage.core.propulsion.Telegraph.HALF, "telegraph reset on leave");
+
+        // встал снова и «исчез» (вышел из игры): на ближайшем тике корабль сам снимает его с поста
+        h.assertTrue(com.airshipvoyage.control.HelmService.take(pilot, ship) == com.airshipvoyage.control.HelmService.Result.TAKEN, "retake");
+        com.airshipvoyage.control.HelmService.apply(pilot, ship, 0, 25, 0, false, false);
+        int[] at = {-1};
+        h.onEachTick(() -> {
+            if (at[0] < 0) at[0] = ship.tickCount;
+            if (ship.tickCount < at[0] + 2) return;
+            h.assertTrue(ship.helmsman() == null, "vanished player kept the helm");
+            h.assertTrue(flight.rudderCommandDeg() == 0, "rudder not reset after release");
+            ship.discard();
+            h.succeed();
+        });
+    }
+
+    /**
+     * Люди на борту (ТЗ 8.3, AV-014): две стойки на носу настила киля (x = 7 и 8) — масса каждой по объёму коробки
+     * 0,5 × 1,975 × 0,5 = 0,494 м³ → 80·0,494/0,648 = 60,96 кг, вместе 121,9 кг с моментом ≈ 121,9·7,5 = 914 кг·м.
+     * Уравновешенный корабль тяжелеет и клюёт носом. Без учёта людей он висит ровно (weighedOffShipHovers).
+     */
+    @GameTest(template = DOCK, timeoutTicks = 300, batch = "payload")
+    public static void peopleAtTheBowPitchShipNoseDown(GameTestHelper h) {
+        AirshipEntity ship = spawnFlyingShip(h, 12);
+        net.minecraft.world.entity.decoration.ArmorStand[] stands = new net.minecraft.world.entity.decoration.ArmorStand[2];
+        onShipTicks(h, ship, new java.util.TreeMap<>(java.util.Map.of(
+                1, () -> {
+                    stands[0] = dropOnLocal(h, ship, 7, -4.9, 0);
+                    stands[1] = dropOnLocal(h, ship, 8, -4.9, 0);
+                },
+                21, () -> {
+                    double kg = 0;
+                    for (var p : ship.flight().payload()) kg += p.massKg();
+                    AirshipVoyage.LOGGER.info("[test] people aboard: {} bodies, {} kg", ship.flight().payload().size(), String.format("%.2f", kg));
+                    h.assertTrue(ship.flight().payload().size() == 2 && Math.abs(kg - 2 * 80 * 0.5 * 1.975 * 0.5 / 0.648) < 0.01,
+                            "payload " + ship.flight().payload());
+                },
+                71, () -> {
+                    double pitch = Math.toDegrees(ship.body().orientation().pitchRad());
+                    double heavy = ship.flight().balance(ship.environment()).heavinessKg();
+                    AirshipVoyage.LOGGER.info("[test] people at the bow after 2.5 s: pitch {}°, vy {} m/s, heavier by {} kg, stands at local {} / {}",
+                            String.format("%.2f", pitch), String.format("%.3f", ship.body().velocity().y()), String.format("%.1f", heavy),
+                            localOf(ship, stands[0]), localOf(ship, stands[1]));
+                    h.assertTrue(pitch < -1, "bow did not go down: pitch " + pitch);
+                    h.assertTrue(heavy > 100 && heavy < 140, "heaviness " + heavy);
+                    h.assertTrue(ship.flight().payload().size() == 2, "stands fell off");
+                    ship.discard();
+                    h.succeed();
+                })));
+    }
+
     /** AV-012: команды рулей — через `/airship rudder` и `/airship elevator`; сохраняются в мире. */
     @GameTest(template = DOCK, batch = "rudders")
     public static void rudderCommandsAndSave(GameTestHelper h) {
@@ -801,8 +932,8 @@ public final class AirshipGameTests {
     /**
      * Ревью 2, №3: сохранение и загрузка вращающегося корабля со смещённой центровкой не меняют его скорость.
      * Сбросили 50 кг из носового балласта: балласт уравновешен по дифференту (ЦМ на x = 0), сброс даёт момент
-     * −50·8 = −400 кг·м при массе 1585,05 − 50 = 1535,05 кг → ЦМ по X = −0,2606 м (с гондолами и оперением;
-     * в аудите было −0,297). При старом порядке загрузки (скорости, потом балласт) пересборка массы добавляла
+     * −50·8 = −400 кг·м при массе 1615,05 − 50 = 1565,05 кг → ЦМ по X = −0,2556 м (с гондолами, оперением
+     * и штурвальным постом; в аудите было −0,297). При старом порядке загрузки (скорости, потом балласт) пересборка массы добавляла
      * ω × ΔЦМ = (0, 1, 0) × (−0,26, 0, 0) по Z.
      */
     @GameTest(template = DOCK)
@@ -822,7 +953,7 @@ public final class AirshipGameTests {
         copy.load(tag);
         Vec3d v = copy.body().velocity();
         AirshipVoyage.LOGGER.info("[test] load of spinning ship: CoM x {} m, velocity after load {}", String.format("%.6f", comX), v);
-        h.assertTrue(Math.abs(comX + 400 / 1535.052) < 1e-3, "CoM x " + comX);
+        h.assertTrue(Math.abs(comX + 400 / 1565.052) < 1e-3, "CoM x " + comX);
         h.assertTrue(v.length() < 1e-9, "velocity changed by loading: " + v);
         h.assertTrue(copy.body().angularVelocity().distanceTo(new Vec3d(0, 1, 0)) < 1e-9, "spin lost: " + copy.body().angularVelocity());
         h.succeed();

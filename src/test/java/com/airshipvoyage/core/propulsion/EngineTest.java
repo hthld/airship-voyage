@@ -38,6 +38,17 @@ class EngineTest {
         assertEquals(-1.0, e.throttle(), 1e-9);
     }
 
+    /** С поста телеграф переключается на ступень: от «стоп» вперёд — малый, средний, полный и дальше полного не идёт. */
+    @Test
+    void telegraphStepsLikeAHandle() {
+        assertEquals(Telegraph.SLOW, Telegraph.STOP.step(1));
+        assertEquals(Telegraph.FULL, Telegraph.HALF.step(1));
+        assertEquals(Telegraph.FULL, Telegraph.FULL.step(1));
+        assertEquals(Telegraph.SLOW_ASTERN, Telegraph.STOP.step(-1));
+        assertEquals(Telegraph.FULL_ASTERN, Telegraph.FULL_ASTERN.step(-1));
+        assertEquals(Telegraph.HALF, Telegraph.HALF.step(0));
+    }
+
     @Test
     void telegraphKeys() {
         assertEquals(Telegraph.HALF_ASTERN, Telegraph.byKey("half_astern").orElseThrow());

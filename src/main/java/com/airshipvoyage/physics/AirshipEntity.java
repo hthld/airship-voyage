@@ -70,6 +70,12 @@ public class AirshipEntity extends Entity {
     /** Доли мощности моторов для вращения винтов: {"t": [..]} по порядку {@code layout().engines()}. */
     private static final EntityDataAccessor<CompoundTag> DATA_ENGINES =
             SynchedEntityData.defineId(AirshipEntity.class, EntityDataSerializers.COMPOUND_TAG);
+    /** Кто стоит у штурвала (UUID строкой, пусто — никто) — клиенту, чтобы перехватывать клавиши и рисовать приборы. */
+    private static final EntityDataAccessor<String> DATA_HELM =
+            SynchedEntityData.defineId(AirshipEntity.class, EntityDataSerializers.STRING);
+    /** Приборы поста (AV-013): телеграф, рули, скорость, высота, тяжесть, балласт, газ, люди на борту. */
+    private static final EntityDataAccessor<CompoundTag> DATA_HUD =
+            SynchedEntityData.defineId(AirshipEntity.class, EntityDataSerializers.COMPOUND_TAG);
     /** Обороты винта на экране при полном ходу, рад/тик (≈ 3 об/с — быстрее глаз видит строб). */
     private static final float PROP_RAD_PER_TICK_FULL = (float) (Math.PI * 6 / 20);
 
@@ -116,6 +122,8 @@ public class AirshipEntity extends Entity {
         builder.define(DATA_CELLS, new CompoundTag());
         builder.define(DATA_CONSTRUCTION, new CompoundTag());
         builder.define(DATA_ENGINES, new CompoundTag());
+        builder.define(DATA_HELM, "");
+        builder.define(DATA_HUD, new CompoundTag());
     }
 
     // ------------------------------------------------------------------ стройка (ТЗ, 4–5)
@@ -218,6 +226,83 @@ public class AirshipEntity extends Entity {
 
     /** Наполнение камер для рендера (клиент) — 0..1 по порядку {@code layout().cells()}. */
     public float[] cellFillForRender() { return cellFill; }
+
+    // ------------------------------------------------------------------ штурвал (AV-013) и люди на борту (AV-014)
+
+    /** Стоящий у штурвала (сервер); не сохраняется — после перезагрузки к штурвалу встают заново. */
+    private java.util.UUID helmsman;
+
+    public java.util.UUID helmsman() { return helmsman; }
+
+    public void setHelmsman(java.util.UUID id) {
+        helmsman = id;
+        entityData.set(DATA_HELM, id == null ? "" : id.toString());
+        if (id != null) syncHud();
+    }
+
+    /** Стоит ли игрок у штурвала (на клиенте — по синхронизированным данным). */
+    public boolean isHelmsman(net.minecraft.world.entity.player.Player p) {
+        return level().isClientSide ? p.getUUID().toString().equals(entityData.get(DATA_HELM))
+                : p.getUUID().equals(helmsman);
+    }
+
+    /** Данные приборов для клиента. */
+    public CompoundTag hud() { return entityData.get(DATA_HUD); }
+
+    private void syncHud() {
+        if (level().isClientSide) return;
+        CompoundTag t = new CompoundTag();
+        var engines = flight.engines();
+        t.putString("tg", engines.isEmpty() ? "" : engines.get(0).telegraph().key());
+        t.putFloat("thr", engines.isEmpty() ? 0 : (float) engines.get(0).throttle());
+        t.putFloat("r", (float) flight.rudderDeg());
+        t.putFloat("e", (float) flight.elevatorDeg());
+        Vec3d v = flight.body().velocity();
+        t.putFloat("spd", (float) Math.hypot(v.x(), v.z()));
+        t.putFloat("vs", (float) v.y());
+        WorldEnvironment env = environment();
+        t.putFloat("alt", (float) env.altitudeMeters(getY()));
+        t.putFloat("h", (float) flight.balance(env).heavinessKg());
+        double ballastKg = 0;
+        for (FlightModel.Ballast b : flight.ballast()) ballastKg += b.massKg();
+        t.putFloat("b", (float) ballastKg);
+        double people = 0;
+        for (FlightModel.Payload p : flight.payload()) people += p.massKg();
+        t.putFloat("p", (float) people);
+        t.putBoolean("v", flight.venting());
+        float fill = 0;
+        for (int i = 0; i < cellFill.length; i++) fill += cellFill[i] / cellFill.length;
+        t.putFloat("gas", fill);
+        entityData.set(DATA_HUD, t);
+    }
+
+    /**
+     * Масса людей и мобов на борту (ТЗ 8.3, AV-014): кто стоит на деталях этого корабля (под ступнями — деталь),
+     * тот добавляет массу в точке своих ступней. Игрок — 80 кг, остальные — по объёму коробки относительно игрока.
+     * На сервере игрок кораблями не обрезается (см. ShipCollisions), поэтому опора проверяется здесь напрямую.
+     */
+    private void updatePayload() {
+        Vec3d pos = new Vec3d(getX(), getY(), getZ());
+        var ship = new HullCollider.Ship(pos, flight.body().orientation(), hullShapes());
+        List<FlightModel.Payload> people = new java.util.ArrayList<>();
+        for (Entity e : level().getEntities(this, getBoundingBox().inflate(0.5, 2.5, 0.5),
+                e -> e instanceof net.minecraft.world.entity.LivingEntity && e.isAlive() && !e.isSpectator())) {
+            AABB bb = e.getBoundingBox();
+            Vec3d lo = new Vec3d(bb.minX + 0.05, bb.minY - 0.15, bb.minZ + 0.05);
+            Vec3d hi = new Vec3d(bb.maxX - 0.05, bb.minY + 0.05, bb.maxZ - 0.05);
+            if (!HullCollider.supports(lo, hi, List.of(ship))) continue;
+            people.add(new FlightModel.Payload(flight.body().worldToLocal(new Vec3d(e.getX(), e.getY(), e.getZ())), massOf(e)));
+        }
+        flight.setPayload(people);
+    }
+
+    /** Масса существа на борту, кг: игрок — 80, остальные — пропорционально объёму коробки (игрок 0,6 × 1,8 × 0,6). */
+    public static double massOf(Entity e) {
+        if (e instanceof net.minecraft.world.entity.player.Player) return 80;
+        AABB bb = e.getBoundingBox();
+        double volume = bb.getXsize() * bb.getYsize() * bb.getZsize();
+        return Math.max(5, Math.min(3000, 80 * volume / 0.648));
+    }
 
     // --- моторы: на сервере — последние отправленные доли мощности, на клиенте — полученные и углы винтов ---
     private float[] engineThrottle = new float[0];
@@ -446,6 +531,18 @@ public class AirshipEntity extends Entity {
         syncOrientation();
         if (tickCount % 5 == 0) syncCells(false);
         syncEngines(false);
+        if (tickCount % 10 == 0) updatePayload();
+        if (helmsman != null) {
+            var pilot = level().getPlayerByUUID(helmsman);
+            if (pilot == null || !pilot.isAlive() || !com.airshipvoyage.control.HelmService.nearHelm(pilot, this)) {
+                setHelmsman(null);
+                flight.setRudder(0);
+                flight.setElevator(0);
+                flight.setVenting(false);
+            } else if (tickCount % 4 == 0) {
+                syncHud();
+            }
+        }
         carryStandingEntities(entityPos, oldRot, p, body.orientation());
     }
 
@@ -648,14 +745,12 @@ public class AirshipEntity extends Entity {
             cell.setAmountMol(c.getDouble("Mol"));
             cell.setLeakPerSecond(c.getDouble("Leak"));
         }
+        // балласт — абсолютной массой (аудит 3, AUD-03-02): начальное распределение нового корабля
+        // не должно ограничивать восстановление сохранённого
         ListTag ballast = tag.getList("Ballast", Tag.TAG_COMPOUND);
         for (int i = 0; i < ballast.size(); i++) {
             CompoundTag b = ballast.getCompound(i);
-            for (FlightModel.Ballast bag : flight.ballast()) {
-                if (bag.id.equals(b.getString("Id"))) {
-                    flight.dropBallast(bag.id, Math.max(0, bag.massKg() - b.getDouble("Kg")));
-                }
-            }
+            flight.restoreBallast(b.getString("Id"), b.getDouble("Kg"));
         }
         // моторы (ТЗ 8.4): команда телеграфа и фактические обороты
         ListTag engines = tag.getList("Engines", Tag.TAG_COMPOUND);

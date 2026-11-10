@@ -26,6 +26,12 @@ public enum Telegraph {
     /** Имя для команд и сохранения: {@code full_astern}, {@code stop}, {@code half}… */
     public String key() { return name().toLowerCase(Locale.ROOT); }
 
+    /** Соседняя ступень: +1 — на ступень вперёд, −1 — назад; на краях остаётся. Для поста управления (ТЗ 9.2). */
+    public Telegraph step(int direction) {
+        int i = Math.max(0, Math.min(values().length - 1, ordinal() + Integer.signum(direction)));
+        return values()[i];
+    }
+
     public static Optional<Telegraph> byKey(String key) {
         for (Telegraph t : values()) if (t.key().equals(key)) return Optional.of(t);
         return Optional.empty();

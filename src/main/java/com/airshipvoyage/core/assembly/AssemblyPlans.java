@@ -22,6 +22,7 @@ public final class AssemblyPlans {
     public static final String CELL = "folded_gas_cell";
     public static final String ENGINE = "engine_pod";
     public static final String FIN = "tail_fin";
+    public static final String HELM = "helm";
 
     /** Этапы по ТЗ 5.4. */
     public static final int STAGE_STRUCTURE = 2, STAGE_GAS_CELLS = 4, STAGE_EQUIPMENT = 5;
@@ -51,7 +52,9 @@ public final class AssemblyPlans {
             // этап V: оперение с рулями — на кормовом кольце
             new Step("fin_top", Kind.PART, FIN, STAGE_EQUIPMENT, List.of("ring_aft")),
             new Step("fin_port", Kind.PART, FIN, STAGE_EQUIPMENT, List.of("ring_aft")),
-            new Step("fin_stbd", Kind.PART, FIN, STAGE_EQUIPMENT, List.of("ring_aft"))));
+            new Step("fin_stbd", Kind.PART, FIN, STAGE_EQUIPMENT, List.of("ring_aft")),
+            // этап V: штурвальный пост стоит на настиле киля
+            new Step("helm", Kind.PART, HELM, STAGE_EQUIPMENT, List.of("keel"))));
 
     private static final Map<String, AssemblyPlan> BY_LAYOUT = Map.of(PrototypeShip.LAYOUT_ID, PROTOTYPE);
 

@@ -52,6 +52,10 @@ public final class FlightModel {
     /** Коэффициент трения каркаса о землю. */
     public static final double GROUND_FRICTION = 0.6;
     public static final int CONTACT_SUBSTEPS = 8;
+    /** Наибольшее смещение корпуса за подшаг при возможном контакте, м (меньше глубины контакта 0,25). */
+    public static final double MAX_SUBSTEP_TRAVEL = 0.2;
+    /** Предел подшагов за тик (≈ 64 · 0,2 = 12,8 м за тик — 256 м/с, с запасом выше любых скоростей корабля). */
+    public static final int MAX_SUBSTEPS = 64;
     /**
      * Глубина, дальше которой сила контакта не растёт. Корабль, оказавшийся в земле (появился в склоне,
      * загрузился внутри постройки), выдавливается плавно, а не выстреливает, как сжатая пружина:
@@ -130,6 +134,16 @@ public final class FlightModel {
     private final List<GasCell> cells = new ArrayList<>();
     private final List<Ballast> ballast = new ArrayList<>();
     private final List<Engine> engines = new ArrayList<>();
+    /** Люди и грузы на борту (ТЗ 8.3): масса в точке корпуса. Меняется каждые несколько тиков из мира. */
+    private List<Payload> payload = List.of();
+    /**
+     * Грань входа для каждой точки контакта, пока точка в блоке (аудит 3, AUD-03-01): глубоко вошедшая точка
+     * выталкивается обратно через ту грань, через которую вошла, а не через ближайшую — иначе пластина, ушедшая
+     * за середину блока, выдавливалась бы насквозь с другой стороны.
+     */
+    private Vec3d[] entryNormals = new Vec3d[0];
+    /** То же для контактов граней: пара «форма детали — коробка блока» → грань входа. */
+    private java.util.Map<ShapeBox, Vec3d> faceEntries = new java.util.HashMap<>();
     /** Рули (ТЗ 8.5): команда и фактическое отклонение, градусы. Положительные — влево и нос вверх. */
     private double rudderCmdDeg, elevatorCmdDeg, rudderDeg, elevatorDeg;
     private final RigidBody body;
@@ -169,6 +183,7 @@ public final class FlightModel {
             mb.addBox(layout.cells().get(i).bay(), cells.get(i).totalMassKg());
         }
         for (Ballast b : ballast) mb.addPoint(b.local, b.massKg);
+        for (Payload p : payload) mb.addPoint(p.local(), p.massKg());
         return mb.build();
     }
 
@@ -176,7 +191,41 @@ public final class FlightModel {
         double m = layout.structureMassKg();
         for (GasCell c : cells) m += c.totalMassKg();
         for (Ballast b : ballast) m += b.massKg;
+        for (Payload p : payload) m += p.massKg();
         return m;
+    }
+
+    // ------------------------------------------------------------------ люди и грузы на борту (ТЗ 8.3)
+
+    /** Масса на борту: точка в локальных координатах корпуса и масса, кг. */
+    public record Payload(Vec3d local, double massKg) {}
+
+    /** Порог пересборки массы при перемещении людей по палубе, кг·м: мелкие шаги не пересобирают тензор каждый тик. */
+    public static final double PAYLOAD_MOMENT_THRESHOLD = 20;
+
+    /**
+     * Обновить людей и грузы на борту (AV-014). Масса пересобирается, если изменилась суммарная масса больше чем на
+     * 0,5 кг или момент — больше чем на {@value #PAYLOAD_MOMENT_THRESHOLD} кг·м (≈ человек сдвинулся на 25 см).
+     */
+    public void setPayload(List<Payload> next) {
+        double m0 = 0, m1 = 0;
+        Vec3d s0 = Vec3d.ZERO, s1 = Vec3d.ZERO;
+        for (Payload p : payload) { m0 += p.massKg(); s0 = s0.add(p.local().scale(p.massKg())); }
+        for (Payload p : next) { m1 += p.massKg(); s1 = s1.add(p.local().scale(p.massKg())); }
+        if (Math.abs(m1 - m0) < 0.5 && s1.distanceTo(s0) < PAYLOAD_MOMENT_THRESHOLD) return;
+        payload = List.copyOf(next);
+        refreshMass(true);
+    }
+
+    public List<Payload> payload() { return payload; }
+
+    /** Клапаны газа всех камер открыты/закрыты (стравливание с поста, ТЗ 7.4, 9.1). */
+    public void setVenting(boolean open) {
+        for (GasCell c : cells) c.setManualValveOpen(open);
+    }
+
+    public boolean venting() {
+        return !cells.isEmpty() && cells.get(0).manualValveOpen();
     }
 
     /** Пересобрать массу, если она заметно изменилась (утечка, сброс балласта, наполнение). */
@@ -205,9 +254,16 @@ public final class FlightModel {
         // снимок блоков на весь тик: габарит плюс путь, который корпус может пройти за тик (с вращением)
         double reach = (body.velocity().length() + body.angularVelocity().length() * layout.boundingRadius()) * dt
                 + MAX_CONTACT_DEPTH + 0.5;
-        ContactQuery world = env.contacts().snapshot(bounds.inflate(reach, reach, reach));
-        boolean contactPossible = world.mayContact(bounds);
-        int n = contactPossible ? CONTACT_SUBSTEPS : 1;
+        Aabb swept = bounds.inflate(reach, reach, reach);
+        ContactQuery world = env.contacts().snapshot(swept);
+        // Аудит 3, AUD-03-01: возможность контакта — по всей области пути за тик, а не по нынешнему габариту:
+        // на 38 м/с корпус проходит 1,9 м и проскакивал блок, ни разу не проверив контакт. Подшагов столько,
+        // чтобы за подшаг корпус смещался не больше чем на MAX_SUBSTEP_TRAVEL — точки контакта не перепрыгивают блок.
+        boolean contactPossible = world.mayContact(swept);
+        double travel = (body.velocity().length() + body.angularVelocity().length() * layout.boundingRadius()) * dt;
+        int n = contactPossible
+                ? Math.min(MAX_SUBSTEPS, Math.max(CONTACT_SUBSTEPS, (int) Math.ceil(travel / MAX_SUBSTEP_TRAVEL)))
+                : 1;
         double h = dt / n;
 
         int contacts = 0;
@@ -360,9 +416,17 @@ public final class FlightModel {
         List<Penetration> pens = new ArrayList<>();
         // пары «форма детали — коробка блока», уже охваченные точками на рёбрах
         Set<ShapeBox> touched = new HashSet<>();
+        if (entryNormals.length != samples.size()) entryNormals = new Vec3d[samples.size()];
         for (int i = 0; i < samples.size(); i++) {
             Vec3d wp = body.localToWorld(samples.get(i));
             Penetration p = query.probe(wp);
+            if (p == null || p.box() == null || p.depth() <= 0) {
+                entryNormals[i] = null; // вне блока или на самой грани — грань входа ещё не определена
+            } else if (entryNormals[i] == null) {
+                entryNormals[i] = p.normal();
+            } else {
+                p = alongNormal(entryNormals[i], wp, p.box());
+            }
             if (p != null && p.depth() > 0) {
                 points.add(wp);
                 pens.add(p);
@@ -401,6 +465,14 @@ public final class FlightModel {
 
     private record ShapeBox(int shape, Aabb box) {}
 
+    /** Глубина точки в коробке вдоль заданной осевой нормали (наружу из коробки). */
+    static Penetration alongNormal(Vec3d n, Vec3d p, Aabb box) {
+        int axis = Math.abs(n.x()) > 0.5 ? 0 : Math.abs(n.y()) > 0.5 ? 1 : 2;
+        double sign = n.get(axis);
+        double depth = sign > 0 ? box.max(axis) - p.get(axis) : p.get(axis) - box.min(axis);
+        return new Penetration(n, depth, box);
+    }
+
     /**
      * Ревью 2, №5: точки контакта стоят только на рёбрах деталей, и блок, вошедший в середину грани (выступ под
      * серединой киля), их не задевал — киль проходил сквозь него. Для каждой пары «форма детали — коробка блока»,
@@ -408,19 +480,23 @@ public final class FlightModel {
      */
     private void addFaceContacts(ContactQuery query, Set<ShapeBox> touched, List<Vec3d> points, List<Penetration> pens) {
         List<OrientedBox> shapes = layout.hullShapes();
+        java.util.Map<ShapeBox, Vec3d> entries = new java.util.HashMap<>();
         for (int k = 0; k < shapes.size(); k++) {
             OrientedBox w = shapes.get(k).transformed(body.position(), body.orientation());
             Aabb wb = new Aabb(w.aabbMin(), w.aabbMax());
             for (Aabb a : query.boxesIn(wb)) {
+                ShapeBox key = new ShapeBox(k, a);
                 // касание гранью (нулевой объём пересечения) — не контакт
-                if (touched.contains(new ShapeBox(k, a))
+                if (touched.contains(key)
                         || !w.intersectsAabb(a.min().add(1e-6, 1e-6, 1e-6), a.max().sub(new Vec3d(1e-6, 1e-6, 1e-6)))) continue;
-                FaceContact c = faceContact(w, wb, a, query);
+                FaceContact c = faceContact(w, wb, a, query, faceEntries.get(key));
                 if (c == null || c.depth() <= 0) continue;
+                entries.put(key, c.normal());
                 points.add(c.point());
                 pens.add(new Penetration(c.normal(), c.depth(), a));
             }
         }
+        faceEntries = entries;
     }
 
     /** Контакт грани: точка на поверхности детали, нормаль выталкивания (наружу из блока), глубина. */
@@ -433,6 +509,11 @@ public final class FlightModel {
      * Все грани закрыты (деталь глубоко в массиве) — вверх, не больше 0,5 м, как у точек.
      */
     static FaceContact faceContact(OrientedBox w, Aabb wb, Aabb a, ContactQuery query) {
+        return faceContact(w, wb, a, query, null);
+    }
+
+    /** @param entryFace грань входа, запомненная на прошлых подшагах: тогда выталкиваем только через неё */
+    static FaceContact faceContact(OrientedBox w, Aabb wb, Aabb a, ContactQuery query, Vec3d entryFace) {
         FaceContact best = null, up = null;
         for (int axis = 0; axis < 3; axis++) {
             int t1 = (axis + 1) % 3, t2 = (axis + 2) % 3;
@@ -442,6 +523,7 @@ public final class FlightModel {
             double[][] uv = {{lo1, lo2}, {hi1, lo2}, {lo1, hi2}, {hi1, hi2}, {(lo1 + hi1) / 2, (lo2 + hi2) / 2}};
             for (int sign = -1; sign <= 1; sign += 2) {
                 Vec3d push = CollisionBoxes.unit(axis, sign);
+                if (entryFace != null && push.dot(entryFace) < 0.5) continue;
                 double start = sign > 0 ? wb.min(axis) - 1 : wb.max(axis) + 1;
                 double[] depths = new double[uv.length];
                 Vec3d[] entries = new Vec3d[uv.length];
@@ -466,6 +548,7 @@ public final class FlightModel {
                 }
                 Vec3d at = sum.scale(1.0 / count);
                 if (axis == 1 && sign > 0) up = new FaceContact(at, push, Math.min(deepest, 0.5));
+                if (entryFace != null) return new FaceContact(at, push, deepest);
                 double face = sign > 0 ? a.max(axis) : a.min(axis);
                 if (query.probe(point(axis, face + sign * 1e-4, t1, uv[4][0], t2, uv[4][1])) != null) continue; // закрыта
                 if (best == null || deepest < best.depth()) best = new FaceContact(at, push, deepest);
@@ -511,6 +594,7 @@ public final class FlightModel {
         double dry = layout.structureMassKg();
         for (GasCell c : cells) dry += c.massEmptyKg();
         for (Ballast b : ballast) dry += b.massKg;
+        for (Payload p : payload) dry += p.massKg(); // люди и груз на борту (найдено тестом AV-014)
         double liftPerFill = 0; // кг полезной подъёмной силы на единицу наполнения
         for (int i = 0; i < cells.size(); i++) {
             GasCell cell = cells.get(i);
@@ -529,7 +613,21 @@ public final class FlightModel {
         refreshMass(true);
     }
 
-    /** Сбросить до {@code kg} балласта из мешка {@code id} (или из всех, если id = "all"). @return сброшено, кг */
+    /** Больше этого в один мешок балласта при загрузке не принимается (вся вода прототипа — 200 кг). */
+    public static final double MAX_BALLAST_PER_BAG_KG = 200;
+
+    /**
+     * Восстановить массу балласта из сохранения — абсолютное значение, а не «сброс» от начального запаса
+     * (аудит 3, AUD-03-02: при смене начального распределения часть сохранённой воды пропадала).
+     * Значение проверяется: не число и отрицательное — 0, больше {@value #MAX_BALLAST_PER_BAG_KG} — предел.
+     */
+    public void restoreBallast(String id, double kg) {
+        double v = Double.isFinite(kg) ? Math.max(0, Math.min(MAX_BALLAST_PER_BAG_KG, kg)) : 0;
+        for (Ballast b : ballast) if (b.id.equals(id)) b.massKg = v;
+        refreshMass(true);
+    }
+
+    /** Сбросить до {@code kg} балласта из мешка {@code id} (или из всех по порядку, если id = "all"). @return сброшено, кг */
     public double dropBallast(String id, double kg) {
         double dropped = 0;
         for (Ballast b : ballast) {

@@ -52,18 +52,18 @@ class FlightModelTest {
         FlightModel m = ship(0);
         var env = env(null);
         double f = m.weighOff(env);
-        // сухая масса: каркас 976 + гондолы 2 × 70 + оперение 48 + оболочки 221,05 + балласт 200 = 1585,05 кг;
+        // сухая масса: каркас 976 + гондолы 2 × 70 + оперение 48 + пост 30 + оболочки 221,05 + балласт 200 = 1615,05 кг;
         // чистая подъёмная сила водорода у моря 1,225 − 0,0853 = 1,1397 кг/м³, объём камер 1582,1 м³ →
-        // уравновешивание при 1585,05 / (1,1397 · 1582,1) = 0,879 — см. описание PrototypeShip
-        assertEquals(0.879, f, 0.002, "weigh-off fill");
+        // уравновешивание при 1615,05 / (1,1397 · 1582,1) = 0,8957 — см. описание PrototypeShip
+        assertEquals(0.8957, f, 0.002, "weigh-off fill");
         var b = m.balance(env);
         assertEquals(0, b.heavinessKg(), 0.01);
-        // плюс водород: 0,879 · 1582,1 м³ · 0,0853 кг/м³ ≈ 119 кг
-        assertEquals(1704, b.massKg(), 3, "mass");
-        // балансировочный балласт держит ЦМ над серединой: оперение 48 кг на x = −8,5 (момент −408) уравновешено
-        // мешками 125,5 кг на носу и 74,5 кг на корме (8 · 51 = 408)
-        assertEquals(125.5, m.ballast().get(0).massKg(), 1e-6);
-        assertEquals(74.5, m.ballast().get(1).massKg(), 1e-6);
+        // плюс водород: 0,8957 · 1582,1 м³ · 0,0853 кг/м³ ≈ 121 кг
+        assertEquals(1736, b.massKg(), 3, "mass");
+        // балансировочный балласт держит ЦМ над серединой: оперение 48 кг на x = −8,5 (−408) и пост 30 кг на x = 9,6
+        // (+288) — момент −120 уравновешен мешками 107,5 кг на носу и 92,5 кг на корме (8 · 15 = 120)
+        assertEquals(107.5, m.ballast().get(0).massKg(), 1e-6);
+        assertEquals(92.5, m.ballast().get(1).massKg(), 1e-6);
         assertEquals(0, b.centreOfMassLocal().x(), 1e-6);
     }
 
@@ -126,9 +126,9 @@ class FlightModelTest {
         }
         // наполнение 95 % → высота давления ≈ 430 м: дальше автоклапаны стравливают газ
         assertTrue(m.cells().get(0).amountMol() < mol0 * 0.95, "no venting");
-        // равновесие там, где плотность воздуха упала до доли уравновешивания (0,879): по ISA
-        // (1 − 0,0065·h/288,15)^4,256 = 0,879 → h ≈ 1,32 км; корабль подходит к ней с небольшим проскоком
-        assertTrue(peak > 1250 && peak < 1600, "peak altitude " + peak);
+        // равновесие там, где плотность воздуха упала до доли уравновешивания (0,8957): по ISA
+        // (1 − 0,0065·h/288,15)^4,256 = 0,8957 → h ≈ 1,13 км; корабль подходит к ней с небольшим проскоком
+        assertTrue(peak > 1050 && peak < 1400, "peak altitude " + peak);
     }
 
     @Test
@@ -414,16 +414,121 @@ class FlightModelTest {
         assertEquals(0, m.body().angularVelocity().y(), 0.003, "yaw rate after 40 s");
     }
 
-    /** Руль высоты на ходу задирает нос: +15° на полном ходу — дифферент на корму больше 0,5°; на месте — ничего. */
+    /** Руль высоты на ходу задирает нос: +15° на полном ходу — нос выше, чем без руля, больше чем на 0,5°. */
     @Test
     void elevatorPitchesNoseUpUnderWay() {
+        double[] pitch = new double[2];
+        for (int k = 0; k < 2; k++) {
+            FlightModel m = trimmedShip();
+            m.setTelegraph("all", com.airshipvoyage.core.propulsion.Telegraph.FULL);
+            run(m, env(null), 30);
+            m.setElevator(k * 15);
+            run(m, env(null), 30);
+            pitch[k] = Math.toDegrees(m.body().orientation().pitchRad());
+        }
+        assertTrue(pitch[1] - pitch[0] > 0.5, "pitch without elevator " + pitch[0] + ", with +15° " + pitch[1]);
+    }
+
+    // ------------------------------------------------------------------ масса на борту (AV-014, ТЗ 8.3)
+
+    /**
+     * Двое (2 × 80 кг) стоят у носа на настиле: (8; −5,25; 0). Корабль переуравновешен газом под новую массу
+     * (заполнение 0,984), так что висит, и встаёт с дифферентом, при котором центр масс под центром плавучести.
+     * Ручной расчёт: ЦМ = (1280 / 1907,85; −2654,9 / 1907,85) = (0,671; −1,392), центр газа на y = 1,193 →
+     * tg θ = 0,671 / 2,585 → θ = −14,6° (нос вниз); статика проверена отдельно — ровно при −14,55° корабль стоит.
+     * Маленький корабль очень чувствителен к людям на борту.
+     */
+    @Test
+    void peopleAtTheBowPitchShipNoseDown() {
         FlightModel m = trimmedShip();
-        m.setTelegraph("all", com.airshipvoyage.core.propulsion.Telegraph.FULL);
-        run(m, env(null), 30);
-        m.setElevator(15);
-        run(m, env(null), 30);
-        assertTrue(Math.toDegrees(m.body().orientation().pitchRad()) > 0.5,
-                "pitch " + Math.toDegrees(m.body().orientation().pitchRad()));
+        m.setPayload(List.of(new FlightModel.Payload(new Vec3d(8, -5.25, 0), 80),
+                new FlightModel.Payload(new Vec3d(8, -5.25, 0), 80)));
+        var env = env(null);
+        double f = m.weighOff(env);
+        assertEquals(0.9844, f, 0.002, "re-weighed fill");
+        // На месте корабль качается вокруг равновесия как маятник (от 0 до −27° с периодом ≈ 10 с, затухает медленно:
+        // без хода гасит только сопротивление вращению) — сравниваем средний дифферент за две последние качки.
+        run(m, env, 100);
+        double sum = 0;
+        int n = 0;
+        for (int i = 0; i < 400; i++) {
+            m.step(DT, env);
+            sum += Math.toDegrees(m.body().orientation().pitchRad());
+            n++;
+        }
+        assertEquals(-14.55, sum / n, 1.0, "mean pitch with two people at the bow");
+    }
+
+    /** Мелкое перемещение людей не пересобирает массу каждый тик: порог — 0,5 кг и 20 кг·м. */
+    @Test
+    void payloadThresholdIgnoresTinyShifts() {
+        FlightModel m = trimmedShip();
+        m.setPayload(List.of(new FlightModel.Payload(new Vec3d(0, -5.25, 0), 80)));
+        double mass = m.body().massKg();
+        assertEquals(1736 + 80, mass, 3);
+        m.setPayload(List.of(new FlightModel.Payload(new Vec3d(0.1, -5.25, 0), 80))); // 8 кг·м — меньше порога
+        assertEquals(new Vec3d(0, -5.25, 0), m.payload().get(0).local());
+        m.setPayload(List.of(new FlightModel.Payload(new Vec3d(1.0, -5.25, 0), 80))); // 80 кг·м — пересобрать
+        assertEquals(new Vec3d(1.0, -5.25, 0), m.payload().get(0).local());
+        m.setPayload(List.of());
+        assertEquals(mass - 80, m.body().massKg(), 1e-6);
+    }
+
+    // ------------------------------------------------------------------ аудит 3 (AUD-03-01): быстрый контакт
+
+    /**
+     * Сценарий GPT: пластина 1 × 0,1 × 1 м, 1000 кг, центр (0,5; 0,65; 0,5), скорость −38 м/с вниз, режим «нейтрально».
+     * Под ней блок от y = −1 до 0. Низ пластины на 0,6; габарит с запасом 0,5 начинается с 0,1 — раньше контакт
+     * за тик не проверялся вовсе, и за 0,05 с (1,9 м пути) пластина оказывалась целиком под блоком (низ ≈ −1,3).
+     * Теперь подшагов 10 (1,9 м / 0,2), контакт ловится на входе. Мягкий контакт (≈ 3 Гц, демпфер 28·v на кг)
+     * гасит 38 м/с на пути ≈ 38² / (2 · 28 · 38) ≈ 0,7 м — пластина уходит в блок, но не насквозь (удар такой силы —
+     * дело системы повреждений, фаза 8), и выталкивается обратно вверх, через грань входа, а не через ближайшую
+     * (без памяти грани входа пластину, ушедшую за середину блока, выдавливало вниз — насквозь).
+     */
+    @Test
+    void fastPlateDoesNotTunnelThroughBlock() {
+        var plate = new com.airshipvoyage.core.structure.PartType("plate", 1000,
+                List.of(com.airshipvoyage.core.math.OrientedBox.axisAligned(Vec3d.ZERO, new Vec3d(1, 0.1, 1))), "girder", true);
+        var layout = new com.airshipvoyage.core.structure.ShipLayout("plate",
+                List.of(new com.airshipvoyage.core.structure.PartInstance("plate", plate, Vec3d.ZERO, Quat.IDENTITY)));
+        FlightModel m = new FlightModel(layout, com.airshipvoyage.core.physics.LiftingGas.HYDROGEN);
+        m.setNeutral(true);
+        m.place(new Vec3d(0.5, 0.65, 0.5), Quat.IDENTITY);
+        m.body().setVelocity(new Vec3d(0, -38, 0));
+        var env = blocks(List.of(new Aabb(new Vec3d(0, -1, 0), new Vec3d(1, 0, 1))));
+        m.step(DT, env);
+        assertTrue(m.lastReport().grounded(), "contact was not checked during the tick");
+        // мягкий контакт гасит 38 м/с поздно: центр пластины доходит до ≈ −0,98, но её верх (центр + 0,05)
+        // ни разу не уходит ниже низа блока (−1) — насквозь не проходит
+        double lowest = m.body().position().y();
+        for (int i = 0; i < 20; i++) {
+            m.step(DT, env);
+            lowest = Math.min(lowest, m.body().position().y());
+        }
+        assertTrue(lowest + 0.05 > -1.0, "plate went through the block: lowest centre " + lowest);
+        // и выталкивается вверх — через грань входа, а не вниз через ближайшую (раньше — вниз, насквозь)
+        assertTrue(m.body().position().y() > 0 && m.body().velocity().y() > 0,
+                "not pushed back up: y " + m.body().position().y() + ", vy " + m.body().velocity().y());
+    }
+
+    // ------------------------------------------------------------------ аудит 3 (AUD-03-02): балласт из сохранения
+
+    /** Восстановление абсолютной массы балласта: сохранённые 100 кг на корме — 100, а не новые начальные 74,5. */
+    @Test
+    void ballastRestoresAbsoluteMass() {
+        FlightModel m = ShipLayouts.newFlightModel(PrototypeShip.layout());
+        assertEquals(92.5, m.ballast().get(1).massKg(), 1e-6);
+        m.restoreBallast("aft", 100);
+        m.restoreBallast("fwd", 100);
+        assertEquals(100, m.ballast().get(1).massKg(), 1e-9);
+        assertEquals(100, m.ballast().get(0).massKg(), 1e-9);
+        // проверка значения: отрицательное, NaN и больше всей воды корабля — не принимаются как есть
+        m.restoreBallast("aft", -5);
+        assertEquals(0, m.ballast().get(1).massKg(), 0);
+        m.restoreBallast("aft", Double.NaN);
+        assertEquals(0, m.ballast().get(1).massKg(), 0);
+        m.restoreBallast("aft", 1e9);
+        assertEquals(FlightModel.MAX_BALLAST_PER_BAG_KG, m.ballast().get(1).massKg(), 0);
     }
 
     @Test

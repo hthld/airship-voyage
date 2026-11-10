@@ -29,6 +29,17 @@ public final class ShipRegistry {
         if (set != null) set.remove(ship);
     }
 
+    /** Все загруженные корабли этого мира (снимок). */
+    public static List<AirshipEntity> ships(Level level) {
+        Set<AirshipEntity> set = SHIPS.get(level);
+        if (set == null) return List.of();
+        synchronized (SHIPS) {
+            List<AirshipEntity> out = new ArrayList<>();
+            for (AirshipEntity s : set) if (!s.isRemoved()) out.add(s);
+            return out;
+        }
+    }
+
     /** Корабли, чья описанная коробка пересекает {@code area}. */
     public static List<AirshipEntity> shipsIntersecting(Level level, AABB area) {
         Set<AirshipEntity> set = SHIPS.get(level);

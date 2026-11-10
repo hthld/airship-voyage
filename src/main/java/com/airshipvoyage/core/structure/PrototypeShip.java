@@ -77,6 +77,16 @@ public final class PrototypeShip {
     public static final PartType VERTICAL_FIN = new PartType("vertical_fin", 12,
             List.of(box(0, 0, 0, 3.0, 2.0, 0.2)), "gas_cell", false);
 
+    /**
+     * Штурвальный пост (ТЗ 9.1–9.2): тумба с штурвалом, телеграфом и рукоятками балласта и газа на носовом конце
+     * настила киля — там проход всё равно кончается. 0,6 × 1,1 × 0,8 м, 30 кг.
+     */
+    public static final PartType HELM = new PartType("helm", 30,
+            List.of(box(0, 0, 0, 0.6, 1.1, 0.8)), "engine", false);
+
+    /** Центр штурвального поста (локальные координаты): на настиле (верх −5,25), у носового кольца. */
+    public static final Vec3d HELM_POS = new Vec3d(9.6, DECK_TOP + 0.55, 0);
+
     /** Хорда оперения по оси корабля: от кормового кольца (x = −10) вперёд до x = −7; центр давления — x = −8,5. */
     public static final double FIN_X = -8.5;
 
@@ -102,7 +112,8 @@ public final class PrototypeShip {
                     // горизонтальные — у наружных граней боковых стоек (z 6…9)
                     new PartInstance("fin_top", VERTICAL_FIN, new Vec3d(FIN_X, 7.0, 0), Quat.IDENTITY),
                     new PartInstance("fin_port", HORIZONTAL_FIN, new Vec3d(FIN_X, 0, -7.5), Quat.IDENTITY),
-                    new PartInstance("fin_stbd", HORIZONTAL_FIN, new Vec3d(FIN_X, 0, 7.5), Quat.IDENTITY)),
+                    new PartInstance("fin_stbd", HORIZONTAL_FIN, new Vec3d(FIN_X, 0, 7.5), Quat.IDENTITY),
+                    new PartInstance("helm", HELM, HELM_POS, Quat.IDENTITY)),
             List.of(cell("cell_aft", -5.0), cell("cell_fwd", 5.0)),
             List.of(engine("engine_port", -ENGINE_Z), engine("engine_stbd", ENGINE_Z)),
             List.of(new ControlSurface("fin_top", ControlSurface.Kind.RUDDER, new Vec3d(FIN_X, 7.0, 0), Vec3d.UNIT_Z, 6.0),

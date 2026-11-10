@@ -36,6 +36,9 @@ public final class ModItems {
     public static final DeferredItem<ShipPartItem> TAIL_FIN = ITEMS.registerItem(AssemblyPlans.FIN,
             p -> new ShipPartItem(AssemblyPlans.FIN, p), new Item.Properties().stacksTo(4));
 
+    public static final DeferredItem<ShipPartItem> HELM = ITEMS.registerItem(AssemblyPlans.HELM,
+            p -> new ShipPartItem(AssemblyPlans.HELM, p), new Item.Properties().stacksTo(1));
+
     public static final DeferredItem<ShipPartItem> FOLDED_GAS_CELL = ITEMS.registerItem(AssemblyPlans.CELL,
             p -> new ShipPartItem(AssemblyPlans.CELL, p), new Item.Properties().stacksTo(1));
 

@@ -58,10 +58,10 @@ class ConstructionStateTest {
             assertTrue(s.install(next.slot(), next.itemKey()).ok(), next.slot());
         }
         assertTrue(s.complete());
-        assertEquals(15, s.installedCount());
-        // кольцо — 4 коробки, ×3; 4 фермы, киль, 2 гондолы и 3 стабилизатора — по одной
-        assertEquals(22, s.installedShapes().size());
-        assertEquals(13, s.installedParts().size());
+        assertEquals(16, s.installedCount());
+        // кольцо — 4 коробки, ×3; 4 фермы, киль, 2 гондолы, 3 стабилизатора и пост — по одной
+        assertEquals(23, s.installedShapes().size());
+        assertEquals(14, s.installedParts().size());
         assertEquals(2, s.installedCells().size());
         assertTrue(s.available().isEmpty());
     }

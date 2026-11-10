@@ -25,6 +25,9 @@ public final class ClientSetup {
         event.register(HelmClient.VENT);
         event.register(HelmClient.TRIM_UP);
         event.register(HelmClient.TRIM_DOWN);
+        event.register(HelmClient.STOP);
+        event.register(HelmClient.AUTO_TRIM);
+        event.register(HelmClient.AUTOPILOT);
     }
 
     /** Приборы поста — поверх всего интерфейса, только пока игрок у штурвала. */

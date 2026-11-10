@@ -360,6 +360,7 @@ public final class AirshipGameTests {
     @GameTest(template = DOCK, timeoutTicks = 300)
     public static void forwardCellLeakPitchesNoseDown(GameTestHelper h) {
         AirshipEntity ship = spawnFlyingShip(h, 13); // верх стабилизатора на 8 м над центром — до потолка дока 1 м
+        ship.flight().setAutoTrim(false); // физика пробоины без насоса дифферента (в игре насос её парирует, D-137)
         onShipTicks(h, ship, new java.util.TreeMap<>(java.util.Map.of(
                 1, () -> ship.flight().cells().get(ship.flight().cellIndex("cell_fwd")).setLeakPerSecond(0.03),
                 81, () -> {
@@ -829,6 +830,11 @@ public final class AirshipGameTests {
             h.assertTrue(e.telegraph() == com.airshipvoyage.core.propulsion.Telegraph.HALF, e.id() + " " + e.telegraph());
         }
         h.assertTrue(flight.rudderCommandDeg() == -25 && flight.elevatorCommandDeg() == 15, "rudders not applied");
+        // руль вправо (−25 из 30) — разностная тяга: правый мотор убавляет, левый прибавляет по 0,1·25/30
+        for (var e : flight.engines()) {
+            double expect = -Math.signum(e.mount().thrustPoint().z()) * 0.1 * 25 / 30;
+            h.assertTrue(Math.abs(e.steer() - expect) < 1e-9, e.id() + " steer " + e.steer());
+        }
         h.assertTrue(flight.venting(), "valves not opened");
         double fwd = flight.ballast().get(0).massKg(), aft = flight.ballast().get(1).massKg();
         AirshipVoyage.LOGGER.info("[test] helm: telegraph {}, rudder {}, elevator {}, ballast {} / {} kg",
@@ -842,10 +848,23 @@ public final class AirshipGameTests {
         h.assertTrue(Math.abs(fwd2 - (fwd - 10)) < 1e-6 && Math.abs(aft2 - (aft + 10)) < 1e-6 && Math.abs(fwd2 + aft2 - total) < 1e-9,
                 "trim pump: " + fwd2 + " / " + aft2);
 
+        h.assertTrue(!flight.autoTrim(), "manual pumping should switch the auto trim off");
+        com.airshipvoyage.control.HelmService.apply(pilot, ship, 0, 0, 0, false, false, 0, false, true);
+        h.assertTrue(flight.autoTrim(), "G did not switch the auto trim back on");
+        com.airshipvoyage.control.HelmService.apply(pilot, ship, 0, 0, 0, false, false, 0, true, false);
+        h.assertTrue(flight.engines().stream().allMatch(e -> e.telegraph() == com.airshipvoyage.core.propulsion.Telegraph.STOP),
+                "X did not stop the engines");
+        com.airshipvoyage.control.HelmService.apply(pilot, ship, 1, 0, 0, false, false);
+        h.assertTrue(flight.engines().get(0).telegraph() == com.airshipvoyage.core.propulsion.Telegraph.SLOW, "W after stop");
+        com.airshipvoyage.control.HelmService.apply(pilot, ship, 1, 0, 0, false, false);
+        com.airshipvoyage.control.HelmService.apply(pilot, ship, 1, 0, 0, false, false);
+        h.assertTrue(flight.engines().get(0).telegraph() == com.airshipvoyage.core.propulsion.Telegraph.FULL, "W to full");
+
         com.airshipvoyage.control.HelmService.leave(pilot, ship);
         h.assertTrue(ship.helmsman() == null, "still at the helm");
+        h.assertTrue(flight.engines().stream().allMatch(e -> e.steer() == 0), "differential not reset on leave");
         h.assertTrue(flight.rudderCommandDeg() == 0 && flight.elevatorCommandDeg() == 0 && !flight.venting(), "controls not reset");
-        h.assertTrue(flight.engines().get(0).telegraph() == com.airshipvoyage.core.propulsion.Telegraph.HALF, "telegraph reset on leave");
+        h.assertTrue(flight.engines().get(0).telegraph() == com.airshipvoyage.core.propulsion.Telegraph.FULL, "telegraph reset on leave");
 
         // встал снова и «исчез» (вышел из игры): на ближайшем тике корабль сам снимает его с поста
         h.assertTrue(com.airshipvoyage.control.HelmService.take(pilot, ship) == com.airshipvoyage.control.HelmService.Result.TAKEN, "retake");
@@ -862,35 +881,40 @@ public final class AirshipGameTests {
     }
 
     /**
-     * Люди на борту (ТЗ 8.3, AV-014): две стойки на носу настила киля (x = 7 и 8) — масса каждой по объёму коробки
-     * 0,5 × 1,975 × 0,5 = 0,494 м³ → 80·0,494/0,648 = 60,96 кг, вместе 121,9 кг с моментом ≈ 121,9·7,5 = 914 кг·м.
-     * Уравновешенный корабль тяжелеет и клюёт носом. Без учёта людей он висит ровно (weighedOffShipHovers).
+     * Люди на борту (ТЗ 8.3, AV-014, D-141): две стойки на носу настила киля (x = 7 и 8) — масса каждой по объёму
+     * коробки 0,5 × 1,975 × 0,5 = 0,494 м³ → 80·0,494/0,648 = 60,96 кг, вместе 121,9 кг. Владелец: вес людей и мобов
+     * должен «в общем прибавлять вес без поворотов там, где они наступили». Корабль тяжелеет на 121,9 кг и
+     * проседает, но не наклоняется. Раньше (масса в точке ступней) — дифферент −9,5° за 2,5 с; наклонённый корпус
+     * при подъёме или проседании ещё и «планировал» вдоль оси — тот снос, что владелец видел при взлёте.
      */
     @GameTest(template = DOCK, timeoutTicks = 300, batch = "payload")
-    public static void peopleAtTheBowPitchShipNoseDown(GameTestHelper h) {
+    public static void peopleAddWeightWithoutTiltingTheShip(GameTestHelper h) {
         AirshipEntity ship = spawnFlyingShip(h, 12);
+        ship.flight().setAutoTrim(false); // наклона быть не должно и без насоса
         net.minecraft.world.entity.decoration.ArmorStand[] stands = new net.minecraft.world.entity.decoration.ArmorStand[2];
+        Vec3d[] p0 = new Vec3d[1];
         onShipTicks(h, ship, new java.util.TreeMap<>(java.util.Map.of(
                 1, () -> {
+                    p0[0] = posOf(ship);
                     stands[0] = dropOnLocal(h, ship, 7, -4.9, 0);
                     stands[1] = dropOnLocal(h, ship, 8, -4.9, 0);
                 },
                 21, () -> {
-                    double kg = 0;
-                    for (var p : ship.flight().payload()) kg += p.massKg();
-                    AirshipVoyage.LOGGER.info("[test] people aboard: {} bodies, {} kg", ship.flight().payload().size(), String.format("%.2f", kg));
-                    h.assertTrue(ship.flight().payload().size() == 2 && Math.abs(kg - 2 * 80 * 0.5 * 1.975 * 0.5 / 0.648) < 0.01,
-                            "payload " + ship.flight().payload());
+                    double kg = ship.flight().crewMassKg();
+                    AirshipVoyage.LOGGER.info("[test] people aboard: {} kg", String.format("%.2f", kg));
+                    h.assertTrue(Math.abs(kg - 2 * 80 * 0.5 * 1.975 * 0.5 / 0.648) < 0.01, "crew mass " + kg);
                 },
                 71, () -> {
                     double pitch = Math.toDegrees(ship.body().orientation().pitchRad());
                     double heavy = ship.flight().balance(ship.environment()).heavinessKg();
-                    AirshipVoyage.LOGGER.info("[test] people at the bow after 2.5 s: pitch {}°, vy {} m/s, heavier by {} kg, stands at local {} / {}",
-                            String.format("%.2f", pitch), String.format("%.3f", ship.body().velocity().y()), String.format("%.1f", heavy),
-                            localOf(ship, stands[0]), localOf(ship, stands[1]));
-                    h.assertTrue(pitch < -1, "bow did not go down: pitch " + pitch);
+                    Vec3d d = posOf(ship).sub(p0[0]);
+                    AirshipVoyage.LOGGER.info("[test] people at the bow after 2.5 s: pitch {}°, vy {} m/s, heavier by {} kg, horizontal drift {} m",
+                            String.format("%.3f", pitch), String.format("%.3f", ship.body().velocity().y()), String.format("%.1f", heavy),
+                            String.format("%.4f", Math.hypot(d.x(), d.z())));
+                    h.assertTrue(Math.abs(pitch) < 0.2, "people tilted the ship: pitch " + pitch);
+                    h.assertTrue(Math.hypot(d.x(), d.z()) < 0.01, "ship drifts sideways");
                     h.assertTrue(heavy > 100 && heavy < 140, "heaviness " + heavy);
-                    h.assertTrue(ship.flight().payload().size() == 2, "stands fell off");
+                    h.assertTrue(ship.body().velocity().y() < -0.1, "heavier ship should sink");
                     ship.discard();
                     h.succeed();
                 })));
@@ -982,6 +1006,80 @@ public final class AirshipGameTests {
     private static boolean forcedByOthers(GameTestHelper h, long k) {
         for (AirshipEntity s : com.airshipvoyage.collision.ShipRegistry.ships(h.getLevel())) if (s.heldChunks().contains(k)) return true;
         return false;
+    }
+
+    /**
+     * D-137: автомат дифферента парирует пробоину в носовой камере (та же утечка 3 %/с, что в
+     * forwardCellLeakPitchesNoseDown, где без насоса за 4 с нос опускается ниже −1°). Центр газа уходит к корме,
+     * насос переносит воду туда же: через 4 с дифферент меньше 1° по модулю, вода перекачана.
+     */
+    @GameTest(template = DOCK, timeoutTicks = 300, batch = "payload")
+    public static void autoTrimCountersForwardLeak(GameTestHelper h) {
+        AirshipEntity ship = spawnFlyingShip(h, 13);
+        h.assertTrue(ship.flight().autoTrim(), "auto trim should be on by default");
+        double[] fwd0 = new double[1];
+        onShipTicks(h, ship, new java.util.TreeMap<>(java.util.Map.of(
+                1, () -> {
+                    fwd0[0] = ship.flight().ballast().get(0).massKg();
+                    ship.flight().cells().get(ship.flight().cellIndex("cell_fwd")).setLeakPerSecond(0.03);
+                },
+                81, () -> {
+                    double pitch = Math.toDegrees(ship.body().orientation().pitchRad());
+                    double moved = fwd0[0] - ship.flight().ballast().get(0).massKg();
+                    AirshipVoyage.LOGGER.info("[test] auto trim against a forward leak after 4 s: pitch {}°, pumped {} kg aft",
+                            String.format("%.2f", pitch), String.format("%.1f", moved));
+                    h.assertTrue(Math.abs(pitch) < 1, "auto trim did not hold the bow: " + pitch);
+                    h.assertTrue(moved > 5, "pumped only " + moved);
+                    ship.discard();
+                    h.succeed();
+                })));
+    }
+
+    /**
+     * Жалоба владельца 10.11.2026: «ходьба по дирижаблю как полузастрявшая, как на шифте». Зомби без целей идёт
+     * своим ходом (moveControl → travel: трение, «стоит на земле», разгон — как у игрока) вдоль киля корабля,
+     * развёрнутого на 37° и наклонённого на 1° по дифференту и 0,5° по крену (обычный корабль в полёте). На земле
+     * за 40 тиков — 4,567 м. Было на наклонённой палубе 2,739 м: обратный перевод из осей корпуса давал горизонталь,
+     * отличную от желаемой на микроны, Minecraft считал это ударом о стену и гасил разгон каждый тик.
+     */
+    @GameTest(template = DOCK, timeoutTicks = 200, batch = "walk")
+    public static void walkingOnTiltedDeckKeepsFullSpeed(GameTestHelper h) {
+        Vec3 p = h.absoluteVec(new Vec3(14, 12, 14));
+        AirshipEntity ship = new AirshipEntity(ModEntities.AIRSHIP.get(), h.getLevel());
+        ship.setLayoutById(PrototypeShip.LAYOUT_ID);
+        ship.placeAt(new Vec3d(p.x, p.y, p.z), Quat.fromYawPitchRoll(Math.toRadians(37), Math.toRadians(1), Math.toRadians(0.5)));
+        ship.flight().weighOff(ship.environment());
+        ship.flight().setNeutral(true); // наклон держится — проверяется ходьба, а не качка
+        h.getLevel().addFreshEntity(ship);
+        var z = net.minecraft.world.entity.EntityType.ZOMBIE.create(h.getLevel());
+        z.goalSelector.removeAllGoals(g -> true);
+        z.targetSelector.removeAllGoals(g -> true);
+        Vec3d w = ship.body().localToWorld(new Vec3d(-6, PrototypeShip.DECK_TOP + 0.02, 0));
+        Vec3d fwd = ship.body().orientation().forward();
+        float facing = (float) Math.toDegrees(Math.atan2(-fwd.x(), fwd.z()));
+        z.moveTo(w.x(), w.y(), w.z(), facing, 0);
+        h.getLevel().addFreshEntity(z);
+        int[] t = {0};
+        Vec3[] p0 = {null};
+        int[] bumps = {0};
+        h.onEachTick(() -> {
+            t[0]++;
+            Vec3 goal = z.position().add(fwd.x() * 30, 0, fwd.z() * 30);
+            z.getMoveControl().setWantedPosition(goal.x, z.getY(), goal.z, 1.0);
+            if (t[0] == 20) p0[0] = z.position();
+            if (t[0] > 20 && z.horizontalCollision) bumps[0]++;
+            if (t[0] == 60) {
+                Vec3 d = z.position().subtract(p0[0]);
+                double dist = Math.hypot(d.x, d.z);
+                AirshipVoyage.LOGGER.info("[test] walk on a tilted deck: {} m in 40 ticks (ground 4.567), wall bumps {}",
+                        String.format("%.3f", dist), bumps[0]);
+                h.assertTrue(dist > 4.4, "walking slowed down on a tilted deck: " + dist);
+                h.assertTrue(bumps[0] == 0, "phantom wall bumps " + bumps[0]);
+                z.discard();
+                ship.discard();
+                h.succeed();
+            }
+        });
     }
 
     /** AV-012: команды рулей — через `/airship rudder` и `/airship elevator`; сохраняются в мире. */

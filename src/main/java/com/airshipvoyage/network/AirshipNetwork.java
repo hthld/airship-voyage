@@ -46,7 +46,7 @@ public final class AirshipNetwork {
      */
     public record HelmInput(int ship, int telegraphStep, float rudder, float elevator, int flags)
             implements CustomPacketPayload {
-        public static final int VENT = 1, DROP = 2, TRIM_UP = 4, TRIM_DOWN = 8;
+        public static final int VENT = 1, DROP = 2, TRIM_UP = 4, TRIM_DOWN = 8, STOP = 16, AUTO_TRIM = 32, AUTOPILOT = 64;
         public boolean has(int flag) { return (flags & flag) != 0; }
         public static final Type<HelmInput> TYPE = new Type<>(id("helm_input"));
         public static final StreamCodec<ByteBuf, HelmInput> CODEC = StreamCodec.composite(
@@ -59,12 +59,21 @@ public final class AirshipNetwork {
         @Override public Type<HelmInput> type() { return TYPE; }
     }
 
+    /** Удар по детали корабля (AV-030): какой корабль и какой слот; урон считает сервер. */
+    public record BreakPart(int ship, String slot) implements CustomPacketPayload {
+        public static final Type<BreakPart> TYPE = new Type<>(id("break_part"));
+        public static final StreamCodec<ByteBuf, BreakPart> CODEC = StreamCodec.composite(
+                ByteBufCodecs.VAR_INT, BreakPart::ship, ByteBufCodecs.STRING_UTF8, BreakPart::slot, BreakPart::new);
+        @Override public Type<BreakPart> type() { return TYPE; }
+    }
+
     @SubscribeEvent
     public static void register(RegisterPayloadHandlersEvent event) {
         var r = event.registrar("1");
         r.playToServer(TakeHelm.TYPE, TakeHelm.CODEC, AirshipNetwork::onTake);
         r.playToServer(LeaveHelm.TYPE, LeaveHelm.CODEC, AirshipNetwork::onLeave);
         r.playToServer(HelmInput.TYPE, HelmInput.CODEC, AirshipNetwork::onInput);
+        r.playToServer(BreakPart.TYPE, BreakPart.CODEC, AirshipNetwork::onBreak);
     }
 
     private static AirshipEntity ship(IPayloadContext ctx, int id) {
@@ -89,8 +98,16 @@ public final class AirshipNetwork {
         AirshipEntity ship = ship(ctx, p.ship());
         if (ship == null) return;
         int trim = (p.has(HelmInput.TRIM_UP) ? 1 : 0) - (p.has(HelmInput.TRIM_DOWN) ? 1 : 0);
+        if (p.has(HelmInput.AUTOPILOT) && ship.isHelmsman(ctx.player())) HelmService.toggleAutopilot(ship);
         HelmService.apply(ctx.player(), ship, Integer.signum(p.telegraphStep()), p.rudder(), p.elevator(),
-                p.has(HelmInput.VENT), p.has(HelmInput.DROP), trim);
+                p.has(HelmInput.VENT), p.has(HelmInput.DROP), trim, p.has(HelmInput.STOP), p.has(HelmInput.AUTO_TRIM));
+    }
+
+    private static void onBreak(BreakPart p, IPayloadContext ctx) {
+        AirshipEntity ship = ship(ctx, p.ship());
+        if (ship == null) return;
+        ctx.player().swing(net.minecraft.world.InteractionHand.MAIN_HAND, true);
+        com.airshipvoyage.damage.ShipBreaking.hit(ctx.player(), ship, p.slot());
     }
 
     private AirshipNetwork() {}

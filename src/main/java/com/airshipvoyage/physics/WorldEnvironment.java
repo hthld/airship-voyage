@@ -31,6 +31,23 @@ public final class WorldEnvironment implements FlightModel.Environment, FlightMo
     @Override public Atmosphere atmosphere() { return Atmosphere.STANDARD; }
     @Override public FlightModel.ContactQuery contacts() { return this; }
 
+    /**
+     * Ветер в проверках (GameTest): null — по умолчанию; на сервере проверок по умолчанию штиль, чтобы старые
+     * проверки положения не «сдувало». Тест ветра задаёт его явно и сбрасывает.
+     */
+    public static volatile Vec3d testWind;
+
+    /** Ветер (ТЗ 8.6, AV-039): поле {@link WindField} от зерна мира, времени, высоты и погоды; сила — из настроек. */
+    @Override
+    public Vec3d wind(Vec3d p) {
+        if (testWind != null) return testWind;
+        if (level.isClientSide || level.getServer() instanceof net.minecraft.gametest.framework.GameTestServer) return Vec3d.ZERO;
+        long seed = level instanceof net.minecraft.server.level.ServerLevel sl ? sl.getSeed() : 0;
+        double weather = 1 + 0.5 * level.getRainLevel(1) + 1.0 * level.getThunderLevel(1);
+        return new com.airshipvoyage.core.physics.WindField(seed).wind(p.x(), p.z(), altitudeMeters(p.y()),
+                level.getGameTime() / 20.0, weather, AirshipConfig.WIND_INTENSITY.get());
+    }
+
     // ------------------------------------------------------------------ контакт с блоками
 
     /**

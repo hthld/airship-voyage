@@ -28,6 +28,10 @@ public final class ModCreativeTabs {
                         output.accept(ModItems.HELM.get());
                         output.accept(ModItems.HYDROGEN_SUPPLY.get());
                         output.accept(ModItems.HELIUM_SUPPLY.get());
+                        output.accept(ModItems.REPAIR_KIT.get());
+                        output.accept(ModItems.FIRE_EXTINGUISHER.get());
+                        output.accept(ModItems.FUEL_CANISTER.get());
+                        output.accept(ModItems.MOORING_MAST.get());
                     })
                     .build());
 

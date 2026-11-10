@@ -19,6 +19,7 @@ public final class GasFilling {
         if (gas == null || !Double.isFinite(availableMol) || availableMol < 0 || !Double.isFinite(dt) || dt <= 0)
             return new Result(Status.INVALID, 0);
         if (availableMol == 0) return new Result(Status.EMPTY_SUPPLY, 0);
+        if (cell.destroyed()) return new Result(Status.INVALID, 0);
         if (cell.amountMol() > 1e-9 && cell.gas() != gas) return new Result(Status.WRONG_GAS, 0);
         if (cell.manualValveOpen()) return new Result(Status.VALVE_OPEN, 0);
         double free = cell.molesForFill(1, air) - cell.amountMol();

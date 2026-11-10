@@ -130,7 +130,7 @@ public final class FlightModel {
         public boolean grounded() { return contactPoints > 0; }
     }
 
-    private final ShipLayout layout;
+    private ShipLayout layout;
     private final List<GasCell> cells = new ArrayList<>();
     private final List<Ballast> ballast = new ArrayList<>();
     private final List<Engine> engines = new ArrayList<>();
@@ -147,7 +147,7 @@ public final class FlightModel {
     /** Рули (ТЗ 8.5): команда и фактическое отклонение, градусы. Положительные — влево и нос вверх. */
     private double rudderCmdDeg, elevatorCmdDeg, rudderDeg, elevatorDeg;
     private final RigidBody body;
-    private final HullDrag drag;
+    private HullDrag drag;
     /** Отладка: вес и архимедова сила не действуют (корабль «идеально уравновешен»). */
     private boolean neutral;
     private double massAtLastBuild;
@@ -163,28 +163,83 @@ public final class FlightModel {
         this.body = new RigidBody(buildMass());
         this.massAtLastBuild = body.massKg();
 
+        updateAero();
+    }
+
+    /**
+     * Присоединённая масса и сопротивление — по целым мешкам: воздух, который корпус увлекает за собой, — это объём
+     * мешков; голый каркас почти весь продувается. Разорванные мешки не в счёт (найдено тестом обломков: гондола
+     * в 70 кг «тащила» воздух двух полных мешков и падала медленнее пушинки).
+     */
+    private void updateAero() {
         double displaced = 0;
-        for (CellSlot s : layout.cells()) displaced += s.capacityM3();
+        boolean anyCell = false;
+        for (int i = 0; i < cells.size(); i++) {
+            if (cells.get(i).destroyed()) continue;
+            displaced += layout.cells().get(i).capacityM3();
+            anyCell = true;
+        }
         Vec3d k = ADDED_MASS_COEFFICIENTS;
         double airMass = 1.225 * displaced;
         body.setAddedMassLocal(new Vec3d(k.x() * airMass, k.y() * airMass, k.z() * airMass));
-
         // габарит без оперения: стабилизаторы — несущие плоскости, их сила считается отдельно (applySurfaces)
-        Vec3d size = layout.aeroSize();
-        // голый каркас почти весь продувается; мешки внутри перекрывают его
-        drag = HullDrag.estimateFromSize(size, 1.2, layout.cells().isEmpty() ? 0.85 : 0.2);
+        drag = HullDrag.estimateFromSize(layout.aeroSize(), 1.2, anyCell ? 0.2 : 0.85);
+    }
+
+    // ------------------------------------------------------------------ повреждения (ТЗ 18, AV-030)
+
+    /**
+     * Корпус без разрушенных деталей ({@code HullDamage.without}): коллизия, масса, моторы и рули — только у
+     * уцелевших. Движение, газ, балласт и команды сохраняются. Камеры — те же (индексы не меняются).
+     */
+    public void replaceLayout(ShipLayout derived) {
+        if (derived == layout) return;
+        if (derived.cells().size() != layout.cells().size()) throw new IllegalArgumentException("cells must stay the same");
+        layout = derived;
+        engines.removeIf(e -> derived.engines().stream().noneMatch(m -> m.slot().equals(e.id())));
+        updateAero();
+        entryNormals = new Vec3d[0];
+        faceEntries.clear();
+        refreshMass(true);
+    }
+
+    /** Камера разорвана: газ ушёл, оболочка отвалилась. */
+    public void destroyCell(int index) {
+        cells.get(index).destroy();
+        updateAero();
+        refreshMass(true);
+    }
+
+    /** Камера подвешена заново (ремонт): пустая. */
+    public void repairCell(int index) {
+        cells.get(index).repair();
+        updateAero();
+        refreshMass(true);
+    }
+
+    /** Поджечь камеру (только водород). @return загорелась ли */
+    public boolean igniteCell(int index) {
+        return cells.get(index).ignite();
     }
 
     // ------------------------------------------------------------------ масса
 
     private MassProperties buildMass() {
+        MassProperties rest = massWithoutCrew().build();
+        if (crewKg <= 0) return rest;
+        // экипаж — в центре масс остального корабля: тяжелее, но без наклона (D-141)
+        return massWithoutCrew().addPoint(rest.centerOfMass(), crewKg).build();
+    }
+
+    private MassProperties.Builder massWithoutCrew() {
         MassProperties.Builder mb = layout.addStructureMass(MassProperties.builder());
         for (int i = 0; i < cells.size(); i++) {
             mb.addBox(layout.cells().get(i).bay(), cells.get(i).totalMassKg());
         }
         for (Ballast b : ballast) mb.addPoint(b.local, b.massKg);
         for (Payload p : payload) mb.addPoint(p.local(), p.massKg());
-        return mb.build();
+        for (Engine e : engines) mb.addSignedPoint(e.mount().thrustPoint(), e.fuelKg() - Engine.TANK_KG); // израсходованное
+        return mb;
     }
 
     private double currentMassKg() {
@@ -192,8 +247,26 @@ public final class FlightModel {
         for (GasCell c : cells) m += c.totalMassKg();
         for (Ballast b : ballast) m += b.massKg;
         for (Payload p : payload) m += p.massKg();
-        return m;
+        for (Engine e : engines) m += e.fuelKg() - Engine.TANK_KG;
+        return m + crewKg;
     }
+
+    private double crewKg;
+
+    /**
+     * Люди и мобы на борту (ТЗ 8.3, D-141): их масса прибавляется к весу корабля в его центре масс — корабль
+     * тяжелеет и проседает, но не клюёт носом и не кренится от того, где кто стоит (решение владельца: «влиять
+     * минимально локально»). Пересборка — при изменении больше чем на 0,5 кг. Точечные грузы с местом —
+     * {@link #setPayload}.
+     */
+    public void setCrewMass(double kg) {
+        double v = Double.isFinite(kg) ? Math.max(0, kg) : 0;
+        if (Math.abs(v - crewKg) < 0.5) return;
+        crewKg = v;
+        refreshMass(true);
+    }
+
+    public double crewMassKg() { return crewKg; }
 
     // ------------------------------------------------------------------ люди и грузы на борту (ТЗ 8.3)
 
@@ -241,7 +314,13 @@ public final class FlightModel {
 
     public StepReport step(double dt, Environment env) {
         tickGas(dt, env);
-        for (Engine e : engines) e.tick(dt);
+        tickAutoTrim(dt);
+        tickAutopilot(env);
+        for (Engine e : engines) {
+            e.tick(dt);
+            e.burn(dt);
+        }
+        tickMooring(dt);
         rudderDeg = servo(rudderDeg, rudderCmdDeg, dt);
         elevatorDeg = servo(elevatorDeg, elevatorCmdDeg, dt);
 
@@ -279,6 +358,7 @@ public final class FlightModel {
         double force = 0, impact = 0;
         for (int s = 0; s < n; s++) {
             applyAeroAndGravity(env);
+            applyMooring();
             if (contactPossible) {
                 double[] r = applyContacts(world);
                 contacts = (int) r[0];
@@ -294,20 +374,44 @@ public final class FlightModel {
     private void applyAeroAndGravity(Environment env) {
         if (!neutral) {
             body.applyCentralForce(new Vec3d(0, -body.massKg() * G, 0));
+            double lift = 0, liftY = 0;
             for (int i = 0; i < cells.size(); i++) {
                 CellSlot slot = layout.cells().get(i);
                 GasCell cell = cells.get(i);
                 Atmosphere.State air = airAtLocal(slot.bay().center(), env);
                 double b = cell.buoyancyN(air);
                 if (b <= 0) continue;
-                body.applyForceAtLocal(new Vec3d(0, b, 0), gasCentreLocal(slot, cell.fillFraction(air)));
+                Vec3d centre = gasCentreLocal(slot, cell.fillFraction(air));
+                body.applyForceAtLocal(new Vec3d(0, b, 0), centre);
+                lift += b;
+                liftY += b * centre.y();
             }
+            if (lift > 0) dampSway(lift * (liftY / lift - body.massProperties().centerOfMass().y()));
         }
         Vec3d pos = body.position();
         double rho = env.atmosphere().at(env.altitudeMeters(pos.y())).densityKgM3();
         drag.apply(body, env.wind(pos), rho, dragCenterLocal());
         applyThrust(env, rho);
         applySurfaces(env, rho);
+    }
+
+    /** Доля критического демпфирования продольной и поперечной качки (D-138). */
+    public static final double SWAY_DAMPING_RATIO = 0.3;
+
+    /**
+     * Затухание качки (D-138): линейный момент −c·ω по крену и дифференту, c = 2ζ·√(K·I), где K — восстанавливающая
+     * жёсткость «маятника» (подъёмная сила × превышение центра газа над ЦМ, Н·м/рад), I — момент инерции по оси.
+     * Без него корабль после шага человека на нос качался ±6° десятки секунд: квадратичное сопротивление решётки
+     * на малых угловых скоростях почти ничего не гасит. Настоящий корпус гасит качку за 2–3 колебания (газ в мешках,
+     * обшивка, упругость конструкции); ζ = 0,3 — оценка. Рыскание не демпфируется: оно не колеблется и ослабило бы поворот.
+     */
+    private void dampSway(double stiffness) {
+        if (!(stiffness > 0)) return;
+        var in = body.massProperties().inertia();
+        Vec3d w = body.orientation().inverseRotate(body.angularVelocity());
+        double cRoll = 2 * SWAY_DAMPING_RATIO * Math.sqrt(stiffness * in.m00());
+        double cPitch = 2 * SWAY_DAMPING_RATIO * Math.sqrt(stiffness * in.m22());
+        body.applyTorque(body.orientation().rotate(new Vec3d(-cRoll * w.x(), 0, -cPitch * w.z())));
     }
 
     /**
@@ -437,6 +541,7 @@ public final class FlightModel {
         List<Vec3d> samples = layout.contactSamples();
         List<Vec3d> points = new ArrayList<>();
         List<Penetration> pens = new ArrayList<>();
+        pointShapes.clear();
         // пары «форма детали — коробка блока», уже охваченные точками на рёбрах
         Set<ShapeBox> touched = new HashSet<>();
         if (entryNormals.length != samples.size()) entryNormals = new Vec3d[samples.size()];
@@ -453,6 +558,7 @@ public final class FlightModel {
             if (p != null && p.depth() > 0) {
                 points.add(wp);
                 pens.add(p);
+                pointShapes.add(layout.sampleShapes(i));
                 if (p.box() != null) for (int k : layout.sampleShapes(i)) touched.add(new ShapeBox(k, p.box()));
             }
         }
@@ -470,6 +576,9 @@ public final class FlightModel {
             Vec3d v = body.velocityAt(wp);
             double vn = v.dot(p.normal());
             impact = Math.max(impact, -vn);
+            if (-vn > 0 && i < pointShapes.size()) {
+                for (int sh : pointShapes.get(i)) impacts.merge(layout.shapeOwner(sh), -vn, Math::max);
+            }
             double fn = k * Math.min(p.depth(), MAX_CONTACT_DEPTH) - c * vn;
             if (fn <= 0) continue; // контакт только отталкивает
             Vec3d f = p.normal().scale(fn);
@@ -487,6 +596,19 @@ public final class FlightModel {
     }
 
     private record ShapeBox(int shape, Aabb box) {}
+
+    /** Формы, которым принадлежит каждая точка контакта этого подшага (для ударов по деталям). */
+    private final List<int[]> pointShapes = new ArrayList<>();
+    /** Удары за шаг: деталь → наибольшая скорость сближения с блоком, м/с (ТЗ 18, 20; AV-040). */
+    private final java.util.Map<String, Double> impacts = new java.util.HashMap<>();
+
+    /** Забрать удары, накопленные с прошлого вызова: деталь → скорость сближения, м/с. */
+    public java.util.Map<String, Double> drainImpacts() {
+        if (impacts.isEmpty()) return java.util.Map.of();
+        var out = java.util.Map.copyOf(impacts);
+        impacts.clear();
+        return out;
+    }
 
     /** Глубина точки в коробке вдоль заданной осевой нормали (наружу из коробки). */
     static Penetration alongNormal(Vec3d n, Vec3d p, Aabb box) {
@@ -517,6 +639,7 @@ public final class FlightModel {
                 entries.put(key, c.normal());
                 points.add(c.point());
                 pens.add(new Penetration(c.normal(), c.depth(), a));
+                pointShapes.add(new int[]{k});
             }
         }
         faceEntries = entries;
@@ -627,6 +750,8 @@ public final class FlightModel {
         for (GasCell c : cells) dry += c.massEmptyKg();
         for (Ballast b : ballast) dry += b.massKg;
         for (Payload p : payload) dry += p.massKg(); // люди и груз на борту (найдено тестом AV-014)
+        dry += crewKg;
+        for (Engine e : engines) dry += e.fuelKg() - Engine.TANK_KG;
         double liftPerFill = 0; // кг полезной подъёмной силы на единицу наполнения
         for (int i = 0; i < cells.size(); i++) {
             GasCell cell = cells.get(i);
@@ -680,6 +805,145 @@ public final class FlightModel {
         return moved;
     }
 
+    // ------------------------------------------------------------------ автомат дифферента и разностная тяга
+
+    /** Насос автомата дифферента, кг/с (D-137). */
+    public static final double AUTO_TRIM_KG_PER_S = 10;
+    /** Доля мощности, которую руль добавляет одному мотору и снимает с другого при полной перекладке (D-136). */
+    public static final double DIFFERENTIAL_THRUST = 0.1;
+
+    private boolean autoTrim = true;
+    private double differential;
+
+    /**
+     * Автомат дифферента (D-137): насос перекачивает воду нос ↔ корма так, чтобы центр масс стоял под центром
+     * подъёмной силы газа (по длине). Люди на борту и утечка в одной камере сначала наклоняют корабль, затем насос
+     * выравнивает его за секунды. Выключается ручной перекачкой с поста или клавишей.
+     */
+    public boolean autoTrim() { return autoTrim; }
+    public void setAutoTrim(boolean on) { autoTrim = on; }
+
+    private void tickAutoTrim(double dt) {
+        Ballast bow = endBallast(true), stern = endBallast(false);
+        if (bow == null || stern == null || bow == stern) return;
+        if (autopilot.engaged()) {
+            // автопилот держит высоту дифферентом: насос гонит воду, пока нос не встанет на нужный угол
+            double err = apPitchTarget - Math.toDegrees(body.orientation().pitchRad());
+            if (Math.abs(err) < 0.2) return;
+            double kg = Math.min(AUTO_TRIM_KG_PER_S * dt, Math.abs(err) * 2 * dt);
+            if (err > 0) transferBallast(bow.id, stern.id, kg); // нос вверх — вода в корму
+            else transferBallast(stern.id, bow.id, kg);
+            return;
+        }
+        if (!autoTrim) return;
+        double mol = 0, momX = 0;
+        for (int i = 0; i < cells.size(); i++) {
+            double n = cells.get(i).amountMol();
+            mol += n;
+            momX += n * layout.cells().get(i).bay().center().x();
+        }
+        if (mol <= 1e-6) return; // без газа корабль лежит на земле — дифферентовать нечего
+        double err = body.massProperties().centerOfMass().x() - momX / mol; // > 0 — тяжёл на нос
+        double needKg = body.massKg() * Math.abs(err) / (bow.local.x() - stern.local.x());
+        if (needKg < 0.02) return;
+        double kg = Math.min(needKg, AUTO_TRIM_KG_PER_S * dt);
+        if (err > 0) transferBallast(bow.id, stern.id, kg);
+        else transferBallast(stern.id, bow.id, kg);
+    }
+
+    /**
+     * Разностная тяга от руля (D-136): {@code s} = −1…1 (&gt; 0 — влево). Моторы правого борта (+Z) прибавляют
+     * {@value #DIFFERENTIAL_THRUST}·s, левого — убавляют: корабль поворачивает и на малом ходу, и на месте.
+     */
+    public void setDifferential(double s) {
+        differential = Math.max(-1, Math.min(1, s));
+        for (Engine e : engines) e.setSteer(Math.signum(e.mount().thrustPoint().z()) * DIFFERENTIAL_THRUST * differential);
+    }
+    public double differential() { return differential; }
+
+    // ------------------------------------------------------------------ автопилот (ТЗ 9.3)
+
+    private final Autopilot autopilot = new Autopilot();
+
+    public Autopilot autopilot() { return autopilot; }
+
+    public double headingDeg() { return Math.toDegrees(body.orientation().yawRad()); }
+
+    /** Включить автопилот на нынешних курсе и высоте. */
+    public void engageAutopilot(Environment env) {
+        autopilot.engage(headingDeg(), env.altitudeMeters(body.position().y()));
+    }
+
+    private void tickAutopilot(Environment env) {
+        if (!autopilot.engaged()) return;
+        Vec3d w = body.orientation().inverseRotate(body.angularVelocity());
+        double[] cmd = autopilot.commands(headingDeg(), Math.toDegrees(body.angularVelocity().y()),
+                env.altitudeMeters(body.position().y()), Math.toDegrees(body.orientation().pitchRad()),
+                Math.toDegrees(w.z()), MAX_DEFLECTION_DEG);
+        setRudder(cmd[0]);
+        setDifferential(cmd[0] / MAX_DEFLECTION_DEG);
+        setElevator(0);
+        apPitchTarget = autopilot.wantedPitchDeg(env.altitudeMeters(body.position().y()));
+    }
+
+    /** Желаемый автопилотом дифферент, градусы (держит насос, см. {@link #tickAutoTrim}). */
+    private double apPitchTarget;
+
+    // ------------------------------------------------------------------ швартовка (ТЗ 10.2)
+
+    /** Жёсткость троса на килограмм массы корабля, Н/м/кг (стальной трос; с присоединённой массой ω ≈ 1 рад/с). */
+    public static final double ROPE_STIFFNESS_PER_KG = 2.0;
+    /** Доля критического демпфирования троса. */
+    public static final double ROPE_DAMPING = 0.7;
+    /** Лебёдка мачты выбирает трос, м/с, до {@value #MIN_ROPE_M} м. */
+    public static final double WINCH_M_PER_S = 0.5, MIN_ROPE_M = 2.0;
+
+    private Vec3d mooringAnchor;
+    private double ropeLength;
+
+    /**
+     * Пришвартовать нос к точке {@code anchorWorld} (голова причальной мачты): трос длиной в нынешнее
+     * расстояние, лебёдка выбирает его до {@value #MIN_ROPE_M} м. Трос только тянет; корабль на нём свободно
+     * разворачивается по ветру вокруг мачты.
+     */
+    public void moor(Vec3d anchorWorld) {
+        mooringAnchor = anchorWorld;
+        ropeLength = Math.max(MIN_ROPE_M, body.localToWorld(noseLocal()).distanceTo(anchorWorld));
+    }
+
+    /** Восстановление из сохранения. */
+    public void restoreMooring(Vec3d anchorWorld, double length) {
+        mooringAnchor = anchorWorld;
+        ropeLength = Math.max(MIN_ROPE_M, length);
+    }
+
+    public void unmoor() { mooringAnchor = null; }
+
+    public Vec3d mooringAnchor() { return mooringAnchor; }
+
+    public double ropeLength() { return ropeLength; }
+
+    /** Носовая точка швартовки: самый нос корпуса на его оси. */
+    public Vec3d noseLocal() { return new Vec3d(layout.localBoundsMax().x(), 0, 0); }
+
+    private void tickMooring(double dt) {
+        if (mooringAnchor != null) ropeLength = Math.max(MIN_ROPE_M, ropeLength - WINCH_M_PER_S * dt);
+    }
+
+    private void applyMooring() {
+        if (mooringAnchor == null) return;
+        Vec3d nose = body.localToWorld(noseLocal());
+        Vec3d toAnchor = mooringAnchor.sub(nose);
+        double d = toAnchor.length();
+        if (d <= ropeLength || d < 1e-9) return;
+        Vec3d dir = toAnchor.scale(1 / d);
+        double m = body.massKg();
+        double k = ROPE_STIFFNESS_PER_KG * m, c = 2 * ROPE_DAMPING * Math.sqrt(k * m);
+        double approach = body.velocityAt(nose).dot(dir); // > 0 — нос идёт к мачте
+        double tension = Math.max(0, k * (d - ropeLength) - c * approach);
+        body.applyForceAt(dir.scale(tension), nose);
+    }
+
     /** Мешок балласта ближе всего к носу (наибольший x) или к корме; null — балласта нет. */
     public Ballast endBallast(boolean bow) {
         Ballast best = null;
@@ -707,6 +971,32 @@ public final class FlightModel {
 
     /** @param heavinessKg &gt; 0 — корабль тяжелее воздуха на столько кг */
     public record Balance(double massKg, double buoyancyKg, double heavinessKg, Vec3d centreOfMassLocal) {}
+
+    /**
+     * Высота давления, м (ТЗ 7.4): на ней самая полная камера с нынешним количеством газа раздувается до 100 %.
+     * Ниже неё подъёмная сила газа почти не зависит от высоты, выше — автоклапаны стравливают газ. Лёгкий корабль
+     * поднимается примерно до неё. NaN — газа нет.
+     */
+    public double pressureHeightMeters(Environment env) {
+        boolean any = false;
+        for (GasCell c : cells) any |= c.amountMol() > 1e-6;
+        if (!any) return Double.NaN;
+        double lo = -500, hi = 30000;
+        if (maxFillAt(env, hi) < 1) return hi;
+        if (maxFillAt(env, lo) >= 1) return lo;
+        for (int i = 0; i < 60; i++) {
+            double mid = (lo + hi) / 2;
+            if (maxFillAt(env, mid) >= 1) hi = mid; else lo = mid;
+        }
+        return (lo + hi) / 2;
+    }
+
+    private double maxFillAt(Environment env, double altitudeM) {
+        Atmosphere.State air = env.atmosphere().at(altitudeM);
+        double max = 0;
+        for (GasCell c : cells) max = Math.max(max, c.fillFraction(air));
+        return max;
+    }
 
     public Balance balance(Environment env) {
         double buoyancy = 0;

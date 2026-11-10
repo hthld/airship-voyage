@@ -6,6 +6,7 @@ import com.airshipvoyage.collision.ShipRegistry;
 import com.airshipvoyage.core.assembly.AssemblyPlan;
 import com.airshipvoyage.core.assembly.AssemblyPlans;
 import com.airshipvoyage.core.assembly.ConstructionState;
+import com.airshipvoyage.core.damage.HullDamage;
 import com.airshipvoyage.core.collision.HullCollider;
 import com.airshipvoyage.core.flight.FlightModel;
 import com.airshipvoyage.core.math.Aabb;
@@ -66,6 +67,12 @@ public class AirshipEntity extends Entity {
     private static final EntityDataAccessor<CompoundTag> DATA_CELLS =
             SynchedEntityData.defineId(AirshipEntity.class, EntityDataSerializers.COMPOUND_TAG);
     /** Стройка: {"active": bool, "installed": [точки плана]}; пусто — корабль летает. */
+    /** Трос швартовки (AV-038): точка мачты {x, y, z}; пусто — не пришвартован. */
+    private static final EntityDataAccessor<CompoundTag> DATA_MOORING =
+            SynchedEntityData.defineId(AirshipEntity.class, EntityDataSerializers.COMPOUND_TAG);
+    /** Повреждения (AV-030): разрушенные детали и камеры, горящие камеры. */
+    private static final EntityDataAccessor<CompoundTag> DATA_DAMAGE =
+            SynchedEntityData.defineId(AirshipEntity.class, EntityDataSerializers.COMPOUND_TAG);
     private static final EntityDataAccessor<CompoundTag> DATA_CONSTRUCTION =
             SynchedEntityData.defineId(AirshipEntity.class, EntityDataSerializers.COMPOUND_TAG);
     /** Доли мощности моторов для вращения винтов: {"t": [..]} по порядку {@code layout().engines()}. */
@@ -122,6 +129,8 @@ public class AirshipEntity extends Entity {
         builder.define(DATA_ORIENTATION, new Quaternionf());
         builder.define(DATA_CELLS, new CompoundTag());
         builder.define(DATA_CONSTRUCTION, new CompoundTag());
+        builder.define(DATA_DAMAGE, new CompoundTag());
+        builder.define(DATA_MOORING, new CompoundTag());
         builder.define(DATA_ENGINES, new CompoundTag());
         builder.define(DATA_HELM, "");
         builder.define(DATA_HUD, new CompoundTag());
@@ -172,22 +181,27 @@ public class AirshipEntity extends Entity {
 
     /** Коллизионные формы в локальных координатах корпуса: у стройки — только установленные детали. */
     public List<OrientedBox> hullShapes() {
-        return construction != null ? constructionShapes : layout.hullShapes();
+        return construction != null ? constructionShapes : shapeLayout().hullShapes();
     }
 
     /** Детали для рендера: у стройки — только установленные. */
     public List<PartInstance> visibleParts() {
-        return construction != null ? construction.installedParts() : layout.parts();
+        return construction != null ? construction.installedParts() : shapeLayout().parts();
     }
 
     /** Камера {@code index} (по {@code layout().cells()}) подвешена — у стройки только установленные. */
     public boolean cellPresent(int index) {
-        return construction == null || construction.isInstalled(layout.cells().get(index).id());
+        if (construction != null) return construction.isInstalled(layout.cells().get(index).id());
+        return index >= cellGone.length || !cellGone[index];
     }
 
     private void setLayout(ShipLayout newLayout) {
         FlightModel old = flight;
         this.layout = newLayout;
+        this.damage = null;
+        this.intact = null;
+        this.cellGone = new boolean[newLayout.cells().size()];
+        this.cellBurning = new boolean[newLayout.cells().size()];
         this.flight = ShipLayouts.newFlightModel(newLayout);
         if (old != null) {
             // смена типа сохраняет позу и движение
@@ -207,6 +221,638 @@ public class AirshipEntity extends Entity {
             syncEngines(true);
         }
         reapplyPosition();
+    }
+
+    // ------------------------------------------------------------------ повреждения, взрывы, пожар (ТЗ 18–19, AV-030)
+
+    private HullDamage damage;
+    /** Чертёж без разрушенных деталей (null — всё цело). */
+    private ShipLayout intact;
+    private boolean[] cellGone = new boolean[0], cellBurning = new boolean[0];
+    /** Камеры, которые надо поджечь на ближайшем тике (не внутри обработки чужого взрыва). */
+    private final java.util.Set<Integer> pendingIgnition = new java.util.LinkedHashSet<>();
+    /** Урон деталям на стапеле (там деталь не разрушается, а снимается). */
+    private final java.util.Map<String, Double> siteDamage = new java.util.HashMap<>();
+
+    public HullDamage damage() {
+        // без обвала по опорам плана: что потеряло связь с корпусом, отделяется обломком (splitIfDisconnected)
+        if (damage == null) damage = new HullDamage(layout, null);
+        return damage;
+    }
+
+    private ShipLayout shapeLayout() { return intact != null ? intact : layout; }
+
+    public boolean cellBurningForRender(int i) { return i < cellBurning.length && cellBurning[i]; }
+
+    private boolean anyBurning() {
+        for (GasCell c : flight.cells()) if (c.burning()) return true;
+        return false;
+    }
+
+    private int[] burningIndices() {
+        java.util.List<Integer> out = new java.util.ArrayList<>();
+        for (int i = 0; i < flight.cells().size(); i++) if (flight.cells().get(i).burning()) out.add(i);
+        return out.stream().mapToInt(Integer::intValue).toArray();
+    }
+
+    private int cellIndexOf(String id) {
+        for (int i = 0; i < layout.cells().size(); i++) if (layout.cells().get(i).id().equals(id)) return i;
+        return -1;
+    }
+
+    /** Пересобрать корпус по списку разрушенного (обе стороны). Не осталось деталей — корабль исчезает. */
+    private void applyDamageState() {
+        repairView = null;
+        java.util.Set<String> partsGone = new java.util.HashSet<>();
+        if (damage != null) {
+            for (String s : damage.destroyed()) if (cellIndexOf(s) < 0) partsGone.add(s);
+        }
+        ShipLayout cut = HullDamage.without(layout, partsGone);
+        if (cut == null) {
+            if (!level().isClientSide) discard();
+            return;
+        }
+        intact = cut == layout ? null : cut;
+        if (!level().isClientSide) flight.replaceLayout(cut); // клиенту модель полёта не нужна
+        cellGone = new boolean[layout.cells().size()];
+        if (damage != null) {
+            for (String s : damage.destroyed()) {
+                int i = cellIndexOf(s);
+                if (i < 0) continue;
+                cellGone[i] = true;
+                if (!level().isClientSide && !flight.cells().get(i).destroyed()) flight.destroyCell(i);
+            }
+        }
+        if (!level().isClientSide && helmsman != null && damage != null && damage.isDestroyed(com.airshipvoyage.control.HelmService.HELM_PART)) {
+            com.airshipvoyage.control.HelmService.release(this);
+        }
+    }
+
+    private void syncDamage() {
+        if (level().isClientSide) return;
+        CompoundTag d = new CompoundTag();
+        d.put("gone", strings(damage().destroyed()));
+        d.putIntArray("burn", burningIndices());
+        entityData.set(DATA_DAMAGE, d);
+    }
+
+    /**
+     * Газ в мешке {@code i} в осях корпуса — то, что видно, и то, обо что ударяются (D-151): мешок висит под
+     * верхом отсека, по высоте — пропорционально наполнению, по сечению раздувается раньше (√f).
+     * null — мешка нет или он почти пуст (меньше 5 %).
+     */
+    public OrientedBox gasBox(int i) {
+        if (!cellPresent(i) || i >= cellFill.length) return null;
+        // сервер — из модели (последнее отправленное клиентам может отставать), клиент — присланное
+        double f = Math.min(1.0, level().isClientSide ? cellFill[i] : flight.fill(i, environment()));
+        if (f < 0.05) return null;
+        OrientedBox bay = layout.cells().get(i).bay();
+        Vec3d h = bay.halfExtents();
+        double side = 0.55 + 0.45 * Math.sqrt(f), height = 2 * h.y() * f, top = bay.center().y() + h.y();
+        return new OrientedBox(new Vec3d(bay.center().x(), top - height / 2, bay.center().z()),
+                new Vec3d(h.x() * side, height / 2, h.z() * side), bay.rotation());
+    }
+
+    /** Формы для столкновений с людьми, мобами, предметами: детали и мешки с газом (D-151). */
+    public List<OrientedBox> entityShapes() {
+        List<OrientedBox> out = new java.util.ArrayList<>(hullShapes());
+        for (int i = 0; i < layout.cells().size(); i++) {
+            OrientedBox g = gasBox(i);
+            if (g != null) out.add(g);
+        }
+        return out;
+    }
+
+    /** На сколько коробка сущности должна погрузиться в деталь, чтобы её выдавливали, м. */
+    private static final double PUSH_DEPTH = 0.05;
+
+    /**
+     * Кто оказался внутри корпуса — корабль наехал, поднялся под ним, опустился на него (D-152), — того
+     * выдавить наружу по кратчайшему пути, а если корабль двигался — по его ходу. Если выдавить некуда (прижат к
+     * земле или стене), сервер ранит его (как падающий блок: 4 + 20 × скорость корпуса в блоках/тик) и
+     * выбрасывает вбок из-под корпуса. Сервер — мобы и предметы; клиент — свой игрок; игрока ранит сервер.
+     */
+    private void pushOutEntities(Vec3d oldPos, Quat oldRot) {
+        Vec3d pos = new Vec3d(getX(), getY(), getZ());
+        Quat rot = orientation();
+        List<OrientedBox> shapes = entityShapes();
+        boolean client = level().isClientSide;
+        for (Entity e : level().getEntities(this, getBoundingBox().inflate(0.5), x -> !(x instanceof AirshipEntity)
+                && !x.isSpectator() && !x.noPhysics && !x.isPassenger())) {
+            boolean localPlayer = e instanceof net.minecraft.world.entity.player.Player p && p.isLocalPlayer();
+            if (client && !localPlayer) continue;
+            AABB bb = e.getBoundingBox();
+            Vec3d c = new Vec3d((bb.minX + bb.maxX) / 2, (bb.minY + bb.maxY) / 2, (bb.minZ + bb.maxZ) / 2);
+            Vec3d lh = HullCollider.localHalfExtents(new Vec3d(bb.getXsize() / 2, bb.getYsize() / 2, bb.getZsize() / 2), rot);
+            Vec3d lc = rot.inverseRotate(c.sub(pos));
+            Vec3d lo = lc.sub(lh), hi = lc.add(lh);
+            double[] exit = new double[6]; // +x −x +y −y +z −z: насколько сдвинуть, чтобы выйти из всех пересечённых
+            boolean any = false;
+            for (OrientedBox s : shapes) {
+                Vec3d sMin = s.aabbMin(), sMax = s.aabbMax();
+                boolean deep = true;
+                for (int a = 0; a < 3 && deep; a++) {
+                    if (Math.min(hi.get(a) - sMin.get(a), sMax.get(a) - lo.get(a)) <= PUSH_DEPTH) deep = false;
+                }
+                if (!deep) continue;
+                any = true;
+                for (int a = 0; a < 3; a++) {
+                    exit[2 * a] = Math.max(exit[2 * a], sMax.get(a) - lo.get(a));
+                    exit[2 * a + 1] = Math.max(exit[2 * a + 1], hi.get(a) - sMin.get(a));
+                }
+            }
+            if (!any || exit[2] <= HullCollider.MAX_SINK) continue; // слегка утонул сверху — это стоящий, им занят collide
+            // как корабль сдвинулся в этой точке за тик (в осях корпуса): навстречу ему и выдавливаем
+            Vec3d shipMove = lc.sub(oldRot.inverseRotate(c.sub(oldPos))).scale(-1);
+            int best = 0;
+            double min = Double.MAX_VALUE;
+            for (int k = 0; k < 6; k++) min = Math.min(min, exit[k]);
+            double bestScore = -Double.MAX_VALUE;
+            for (int k = 0; k < 6; k++) {
+                if (exit[k] > 3 * min + 0.3) continue;
+                Vec3d dir = axisDir(k);
+                double score = shipMove.length() > 0.01 ? dir.dot(shipMove.normalized()) - exit[k] * 0.1 : -exit[k];
+                if (score > bestScore) { bestScore = score; best = k; }
+            }
+            Vec3d pushW = rot.rotate(axisDir(best).scale(exit[best] + 0.01));
+            net.minecraft.world.phys.Vec3 want = new net.minecraft.world.phys.Vec3(pushW.x(), pushW.y(), pushW.z());
+            net.minecraft.world.phys.Vec3 allowed = Entity.collideBoundingBox(e, want, bb, level(), List.of());
+            boolean pinned = allowed.length() < want.length() * 0.5;
+            if (!pinned) {
+                if (client || !(e instanceof net.minecraft.world.entity.player.Player)) {
+                    e.setPos(e.getX() + allowed.x, e.getY() + allowed.y, e.getZ() + allowed.z);
+                } else {
+                    e.setDeltaMovement(e.getDeltaMovement().add(want.scale(0.5)));
+                    e.hurtMarked = true;
+                }
+                continue;
+            }
+            if (client) continue; // придавленного ранит и выбрасывает сервер
+            // прижат: урон и выброс вбок — в ближайшую сторону по горизонтали корпуса
+            int side = exit[0] <= exit[1] ? 0 : 1;
+            int sideZ = exit[4] <= exit[5] ? 4 : 5;
+            if (exit[sideZ] < exit[side]) side = sideZ;
+            Vec3d out = rot.rotate(axisDir(side));
+            double speed = shipMove.length();
+            if (e instanceof net.minecraft.world.entity.LivingEntity living) {
+                living.hurt(damageSources().fallingBlock(this), (float) (4 + 20 * speed));
+            }
+            e.setDeltaMovement(out.x() * 0.8, 0.45, out.z() * 0.8);
+            e.hurtMarked = true;
+        }
+    }
+
+    private static Vec3d axisDir(int k) {
+        double s = (k % 2 == 0) ? 1 : -1;
+        return switch (k / 2) {
+            case 0 -> new Vec3d(s, 0, 0);
+            case 1 -> new Vec3d(0, s, 0);
+            default -> new Vec3d(0, 0, s);
+        };
+    }
+
+    /** Пришвартовать нос к точке мачты (сервер). */
+    public void moor(Vec3d anchor) {
+        flight.moor(anchor);
+        syncMooring();
+    }
+
+    public void unmoor() {
+        flight.unmoor();
+        syncMooring();
+    }
+
+    private void syncMooring() {
+        if (level().isClientSide) return;
+        CompoundTag t = new CompoundTag();
+        Vec3d a = flight.mooringAnchor();
+        if (a != null) {
+            t.putDouble("x", a.x());
+            t.putDouble("y", a.y());
+            t.putDouble("z", a.z());
+        }
+        entityData.set(DATA_MOORING, t);
+    }
+
+    /** Точка мачты для рендера троса; null — не пришвартован. */
+    public Vec3d mooringAnchorForRender() {
+        CompoundTag t = entityData.get(DATA_MOORING);
+        return t.contains("x") ? new Vec3d(t.getDouble("x"), t.getDouble("y"), t.getDouble("z")) : null;
+    }
+
+    /** Пик скорости удара по детали в нынешнем касании и тик, когда она последний раз касалась. */
+    private final java.util.Map<String, Double> impactPeaks = new java.util.HashMap<>();
+    private final java.util.Map<String, Integer> impactSeen = new java.util.HashMap<>();
+
+    /** Урон удара на скорости {@code v}: 6·(v − 3)², до 3 м/с — 0. */
+    public static double impactDamage(double v) {
+        return v <= SAFE_IMPACT_SPEED ? 0 : 6 * (v - SAFE_IMPACT_SPEED) * (v - SAFE_IMPACT_SPEED);
+    }
+
+    /** Удар о блок до этой скорости сближения безопасен, м/с (мягкая посадка). */
+    public static final double SAFE_IMPACT_SPEED = 3.0;
+
+    /**
+     * Удары о землю и скалы (ТЗ 18, 20; AV-040): деталь, врезавшаяся в блок быстрее {@value #SAFE_IMPACT_SPEED} м/с,
+     * получает урон 6·(v − 3)²: 4 м/с — 6 (вмятина), 5 м/с — 24 (ферма, гондола, оперение — вдребезги), 6 м/с — 54
+     * (ломается и кольцо). Корабль без мешка, упавший с высоты, разбивается. Разрушенное разлетается.
+     */
+    private void applyImpacts(java.util.Map<String, Double> impacts) {
+        // один удар — один урон: пока деталь в касании, корпус тормозится несколько тиков (4 → 3 → 2 м/с), и урон
+        // считается по наибольшей скорости касания, а не складывается с каждого тика (найдено тестом жёсткой посадки)
+        impactPeaks.entrySet().removeIf(en -> !impacts.containsKey(en.getKey()) && tickCount - impactSeen.getOrDefault(en.getKey(), 0) > 10);
+        if (impacts.isEmpty()) return;
+        double worst = 0;
+        for (var e : impacts.entrySet()) {
+            double v = e.getValue();
+            impactSeen.put(e.getKey(), tickCount);
+            double before = impactPeaks.getOrDefault(e.getKey(), 0.0);
+            if (v <= before) continue;
+            impactPeaks.put(e.getKey(), v);
+            double dmg = impactDamage(v) - impactDamage(before);
+            if (dmg <= 0) continue;
+            worst = Math.max(worst, v);
+            hitSlot(e.getKey(), dmg, null, true);
+        }
+        if (worst > SAFE_IMPACT_SPEED && level() instanceof net.minecraft.server.level.ServerLevel sl) {
+            sl.playSound(null, getX(), getY(), getZ(), net.minecraft.sounds.SoundEvents.ANVIL_LAND,
+                    net.minecraft.sounds.SoundSource.BLOCKS, (float) Math.min(1.5, worst / 4), 0.6f);
+        }
+    }
+
+    /** Потушить мешок (ведро воды, огнетушитель). @return горел ли */
+    public boolean extinguishCell(String slot) {
+        int ci = cellIndexOf(slot);
+        if (ci < 0 || level().isClientSide || !flight.cells().get(ci).extinguish()) return false;
+        pendingIgnition.remove(ci);
+        Vec3d c = flight.body().localToWorld(layout.cells().get(ci).bay().center());
+        if (level() instanceof net.minecraft.server.level.ServerLevel sl) {
+            sl.sendParticles(net.minecraft.core.particles.ParticleTypes.CLOUD, c.x(), c.y(), c.z(), 40, 2.5, 2.0, 2.5, 0.05);
+            sl.playSound(null, c.x(), c.y(), c.z(), net.minecraft.sounds.SoundEvents.FIRE_EXTINGUISH, net.minecraft.sounds.SoundSource.BLOCKS, 1.0f, 0.8f);
+        }
+        syncDamage();
+        return true;
+    }
+
+    /** Во что попадает луч (удар, стрела, огниво): деталь — её коробки, мешок — объём газа, пустой — отсек. */
+    public List<OrientedBox> hitShapes(String slot) {
+        int ci = cellIndexOf(slot);
+        if (ci < 0 || gasBox(ci) == null) return slotShapes(slot);
+        return List.of(gasBox(ci).transformed(new Vec3d(getX(), getY(), getZ()), orientation()));
+    }
+
+    /** Мировые формы слота: деталь — её коробки, камера — отсек. Пусто — слота нет или он уже разрушен. */
+    public List<OrientedBox> slotShapes(String slot) {
+        Vec3d pos = new Vec3d(getX(), getY(), getZ());
+        List<OrientedBox> out = new java.util.ArrayList<>();
+        for (PartInstance p : visibleParts()) {
+            if (p.slot().equals(slot)) for (OrientedBox b : p.hullShapes()) out.add(b.transformed(pos, orientation()));
+        }
+        int ci = cellIndexOf(slot);
+        if (ci >= 0 && cellPresent(ci)) out.add(layout.cells().get(ci).bay().transformed(pos, orientation()));
+        return out;
+    }
+
+    /**
+     * Урон по слоту (деталь или камера) — удар рукой, взрыв, огонь. Летающий корабль: деталь теряет прочность и
+     * разрушается, отваливается всё, что держалось только на ней; камера ещё и рвётся (растёт утечка).
+     * На стапеле деталь не ломается, а снимается вместе со всем, что на ней стоит (AV-019).
+     *
+     * @param from      откуда пришёл удар (обломки летят от него); null — просто падают
+     * @param dropItems отдавать ли детали предметами (выживание, взрыв); false — творческий режим
+     * @return разрушенные или снятые слоты
+     */
+    public List<String> hitSlot(String slot, double amount, net.minecraft.world.phys.Vec3 from, boolean dropItems) {
+        if (level().isClientSide || !(amount > 0)) return List.of();
+        if (construction != null) {
+            if (!construction.isInstalled(slot)) return List.of();
+            double d = siteDamage.merge(slot, amount, Double::sum);
+            if (d < damage().maxHp(slot)) return List.of();
+            List<String> off = construction.uninstall(slot);
+            off.forEach(siteDamage::remove);
+            for (String s : off) {
+                int ci = cellIndexOf(s);
+                if (ci >= 0) flight.cells().get(ci).setAmountMol(0);
+            }
+            spawnDebris(off, from, dropItems, false);
+            constructionChanged();
+            syncCells(true);
+            return off;
+        }
+        List<String> lost = damage().hit(slot, amount);
+        int ci = cellIndexOf(slot);
+        if (ci >= 0 && lost.isEmpty()) {
+            GasCell c = flight.cells().get(ci);
+            c.setLeakPerSecond(c.leakPerSecond() + amount / HullDamage.CELL_HP * 0.02); // рваная оболочка
+        }
+        onDestroyed(lost, from, dropItems);
+        return lost;
+    }
+
+    /**
+     * Что можно поставить: у стройки — её состояние; у летающего корабля с разрушенными деталями — «стройка» из
+     * всего уцелевшего (ремонт: сломанное ставится заново тем же предметом, на целые опоры, AV-033). null — нечего.
+     */
+    public ConstructionState installState() {
+        if (construction != null) return construction;
+        if (damage == null || damage.destroyed().isEmpty()) return null;
+        var plan = AssemblyPlans.byLayoutId(layout.id()).orElse(null);
+        if (plan == null) return null;
+        if (repairView == null) {
+            List<String> present = new java.util.ArrayList<>();
+            for (var s : plan.steps()) if (!damage.isDestroyed(s.slot())) present.add(s.slot());
+            repairView = ConstructionState.restore(plan, present);
+        }
+        return repairView;
+    }
+
+    private ConstructionState repairView;
+
+    /** Сломанная деталь или камера поставлена заново (ремонт). Камера — пустая, газ надо закачать. */
+    public void repairSlot(String slot) {
+        if (level().isClientSide || damage == null || !damage.repair(slot)) return;
+        int ci = cellIndexOf(slot);
+        if (ci >= 0) flight.repairCell(ci);
+        applyDamageState();
+        syncDamage();
+        syncCells(true);
+    }
+
+    /**
+     * Ремкомплект (AV-033): снять до {@code hp} урона детали или камеры; камере — ещё и заштопать дыры
+     * (утечка падает вчетверо, а целая — до нуля). Горящую камеру не заштопать. @return сколько снято урона
+     */
+    public double healSlot(String slot, double hp) {
+        if (level().isClientSide || construction != null) return 0;
+        int ci = cellIndexOf(slot);
+        if (ci >= 0 && flight.cells().get(ci).burning()) return 0;
+        double healed = damage().heal(slot, hp);
+        if (ci >= 0) {
+            GasCell c = flight.cells().get(ci);
+            c.setLeakPerSecond(damage().hp(slot) >= damage().maxHp(slot) - 1e-9 ? 0 : c.leakPerSecond() * 0.25);
+            if (healed == 0 && c.leakPerSecond() > 0) healed = 1e-9;
+            syncCells(true);
+        }
+        return healed;
+    }
+
+    /** Поджечь камеру (огниво, огненный шар): загорится на ближайшем тике, если там водород. */
+    public boolean igniteCell(String slot) {
+        int ci = cellIndexOf(slot);
+        if (ci < 0 || level().isClientSide || !cellPresent(ci) || flight.cells().get(ci).burning()
+                || flight.cells().get(ci).gas() != com.airshipvoyage.core.physics.LiftingGas.HYDROGEN
+                || flight.cells().get(ci).amountMol() < 1) return false;
+        pendingIgnition.add(ci);
+        return true;
+    }
+
+    // ------------------------------------------------------------------ крушение: обломки (ТЗ 20, фаза 9, AV-032)
+
+    /** Обломок разбитого корабля: без газа, без балласта — падает и лежит остовом, разбирается руками. */
+    private boolean wreck;
+
+    public boolean isWreck() { return wreck; }
+
+    /**
+     * Раскол (ТЗ 20): если после разрушения корпус распался на несвязные части (детали держатся, только касаясь
+     * друг друга — {@link com.airshipvoyage.core.damage.Connectivity}), самая тяжёлая остаётся кораблём, остальные
+     * отделяются обломками — отдельными телами со скоростью своей точки корпуса.
+     */
+    private void splitIfDisconnected() {
+        if (level().isClientSide || construction != null || isRemoved()) return;
+        var comps = com.airshipvoyage.core.damage.Connectivity.components(shapeLayout().parts());
+        if (comps.size() <= 1) return;
+        List<String> off = new java.util.ArrayList<>();
+        for (int c = 1; c < comps.size(); c++) {
+            spawnWreck(comps.get(c));
+            off.addAll(comps.get(c));
+        }
+        damage().destroy(off);
+        applyDamageState();
+        syncDamage();
+        syncCells(true);
+    }
+
+    private void spawnWreck(java.util.Set<String> keep) {
+        AirshipEntity w = new AirshipEntity((net.minecraft.world.entity.EntityType<? extends AirshipEntity>) getType(), level());
+        w.setLayoutById(layout.id());
+        w.wreck = true;
+        w.placeAt(new Vec3d(getX(), getY(), getZ()), orientation());
+        List<String> gone = new java.util.ArrayList<>();
+        Vec3d centroid = Vec3d.ZERO;
+        int n = 0;
+        for (PartInstance p : layout.parts()) {
+            if (keep.contains(p.slot())) {
+                centroid = centroid.add(p.localPosition());
+                n++;
+            } else {
+                gone.add(p.slot());
+            }
+        }
+        for (var c : layout.cells()) gone.add(c.id()); // мешки рвутся при расколе — газ остаётся у корабля или уходит
+        w.damage().destroy(gone);
+        for (var b : w.flight.ballast()) w.flight.dropBallast(b.id, b.massKg()); // вода — в баках киля корабля
+        w.flight.setAutoTrim(false);
+        w.applyDamageState();
+        Vec3d at = flight.body().localToWorld(centroid.scale(1.0 / Math.max(1, n)));
+        w.flight.body().setVelocity(flight.body().velocityAt(at));
+        w.flight.body().setAngularVelocity(flight.body().angularVelocity());
+        w.syncDamage();
+        w.syncCells(true);
+        level().addFreshEntity(w);
+        AirshipVoyage.LOGGER.info("Airship {}: wreck {} broke off", getUUID().toString().substring(0, 8), keep);
+    }
+
+    private void onDestroyed(List<String> lost, net.minecraft.world.phys.Vec3 from, boolean dropItems) {
+        if (lost.isEmpty()) return;
+        AirshipVoyage.LOGGER.info("Airship {}: lost {} (from {})", getUUID().toString().substring(0, 8), lost, from);
+        spawnDebris(lost, from, dropItems, true);
+        applyDamageState();
+        syncDamage();
+        syncCells(true);
+        splitIfDisconnected();
+    }
+
+    /** Обломки: деталь — предметом, летящим от места удара; пыль и звук. Камера — без предмета (порвана). */
+    private void spawnDebris(List<String> slots, net.minecraft.world.phys.Vec3 from, boolean dropItems, boolean shapesFromBase) {
+        if (!(level() instanceof net.minecraft.server.level.ServerLevel sl)) return;
+        Vec3d pos = new Vec3d(getX(), getY(), getZ());
+        var plan = AssemblyPlans.byLayoutId(layout.id()).orElse(null);
+        for (String s : slots) {
+            Vec3d c = null;
+            for (PartInstance p : layout.parts()) if (p.slot().equals(s)) c = flight.body().localToWorld(p.localPosition());
+            int ci = cellIndexOf(s);
+            if (c == null && ci >= 0) c = flight.body().localToWorld(layout.cells().get(ci).bay().center());
+            if (c == null) continue;
+            var at = new net.minecraft.world.phys.Vec3(c.x(), c.y(), c.z());
+            sl.sendParticles(net.minecraft.core.particles.ParticleTypes.POOF, at.x, at.y, at.z, 12, 0.6, 0.4, 0.6, 0.05);
+            sl.playSound(null, at.x, at.y, at.z, net.minecraft.sounds.SoundEvents.ITEM_BREAK, net.minecraft.sounds.SoundSource.BLOCKS, 1.0f, 0.7f);
+            boolean isCell = ci >= 0;
+            if (!dropItems || plan == null || plan.step(s) == null || (isCell && shapesFromBase)) continue;
+            var item = net.minecraft.core.registries.BuiltInRegistries.ITEM.get(
+                    net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(AirshipVoyage.MOD_ID, plan.step(s).itemKey()));
+            if (item == net.minecraft.world.item.Items.AIR) continue;
+            var drop = new net.minecraft.world.entity.item.ItemEntity(sl, at.x, at.y, at.z, new net.minecraft.world.item.ItemStack(item));
+            net.minecraft.world.phys.Vec3 dir = from == null ? new net.minecraft.world.phys.Vec3(0, 1, 0) : at.subtract(from);
+            dir = dir.lengthSqr() < 1e-6 ? new net.minecraft.world.phys.Vec3(0, 1, 0) : dir.normalize();
+            double speed = from == null ? 0.1 : 0.45 + random.nextDouble() * 0.25;
+            drop.setDeltaMovement(dir.x * speed, dir.y * speed + 0.25, dir.z * speed);
+            drop.setDefaultPickUpDelay();
+            sl.addFreshEntity(drop);
+        }
+    }
+
+    /**
+     * Взрыв рядом (ТЗ 18–19): каждой детали и камере — урон по расстоянию до ближайшей точки
+     * ({@link HullDamage#blastDamage}), разрушенное разлетается; камера рвётся, водородная от сильного удара
+     * загорается; кораблю — толчок 400·power·(1 − d/2power) Н·с в ближайшую к взрыву точку корпуса.
+     */
+    public void onExplosion(net.minecraft.world.phys.Vec3 centre, double power) {
+        if (level().isClientSide || construction != null) return;
+        Vec3d c = new Vec3d(centre.x, centre.y, centre.z);
+        Vec3d pos = new Vec3d(getX(), getY(), getZ());
+        double nearest = Double.MAX_VALUE;
+        Vec3d nearestAt = null;
+        java.util.Map<String, Double> hits = new java.util.LinkedHashMap<>();
+        for (PartInstance p : visibleParts()) {
+            for (OrientedBox b : p.hullShapes()) {
+                OrientedBox w = b.transformed(pos, orientation());
+                double d = w.distanceTo(c);
+                hits.merge(p.slot(), HullDamage.blastDamage(power, d), Math::max);
+                if (d < nearest) { nearest = d; nearestAt = w.center(); }
+            }
+        }
+        for (int i = 0; i < layout.cells().size(); i++) {
+            if (!cellPresent(i) || flight.cells().get(i).burning()) continue; // горящую жжёт пожар, не вспышка
+            double d = layout.cells().get(i).bay().transformed(pos, orientation()).distanceTo(c);
+            double dmg = HullDamage.blastDamage(power, d);
+            if (dmg <= 0) continue;
+            hits.merge(layout.cells().get(i).id(), dmg, Math::max);
+            if (dmg >= 15) pendingIgnition.add(i); // пламя взрыва поджигает водород
+        }
+        List<String> lost = new java.util.ArrayList<>();
+        for (var e : hits.entrySet()) {
+            if (e.getValue() <= 0 || damage().isDestroyed(e.getKey())) continue;
+            lost.addAll(damage().hit(e.getKey(), e.getValue()));
+            int ci = cellIndexOf(e.getKey());
+            if (ci >= 0 && !damage().isDestroyed(e.getKey())) {
+                GasCell cell = flight.cells().get(ci);
+                cell.setLeakPerSecond(cell.leakPerSecond() + e.getValue() / HullDamage.CELL_HP * 0.05);
+            }
+        }
+        if (nearestAt != null) {
+            double j = 400 * power * Math.max(0, 1 - nearest / (2 * power));
+            Vec3d dir = nearestAt.sub(c);
+            if (j > 0 && dir.length() > 1e-6) flight.body().applyImpulseAt(dir.normalized().scale(j), nearestAt);
+        }
+        onDestroyed(lost, centre, true);
+        syncCells(true);
+    }
+
+    /**
+     * Пожар (ТЗ 19), раз в тик на сервере: поджечь отложенные камеры — вспышка водорода (взрыв силы 2 + 2·наполнение
+     * с огнём); горящая камера раз в секунду жжёт детали, касающиеся отсека, и с вероятностью 15 % поджигает соседнюю
+     * водородную; выгоревшая — разрушена.
+     */
+    /** Урон огнём детали, касающейся горящего мешка, в секунду: ферма (20) прогорает за ≈ 13 с, кольцо (48) — нет. */
+    private static final double FIRE_DAMAGE_PER_S = 1.5;
+
+    private void tickFire() {
+        if (!pendingIgnition.isEmpty()) {
+            List<Integer> now = new java.util.ArrayList<>(pendingIgnition);
+            pendingIgnition.clear();
+            WorldEnvironment env = environment();
+            for (int i : now) {
+                if (i >= flight.cells().size() || !flight.igniteCell(i)) continue;
+                Vec3d c = flight.body().localToWorld(layout.cells().get(i).bay().center());
+                double power = 2 + 2 * Math.min(1, flight.fill(i, env));
+                syncDamage();
+                level().explode(this, c.x(), c.y(), c.z(), (float) power, true, Level.ExplosionInteraction.MOB);
+            }
+        }
+        boolean changed = false;
+        for (int i = 0; i < flight.cells().size(); i++) {
+            GasCell cell = flight.cells().get(i);
+            String id = layout.cells().get(i).id();
+            if (cell.destroyed() && !damage().isDestroyed(id)) {
+                onDestroyed(damage().destroy(List.of(id)), null, false); // выгорела
+                changed = true;
+                continue;
+            }
+            if (!cell.burning() || tickCount % 20 != 0) continue;
+            Vec3d pos = new Vec3d(getX(), getY(), getZ());
+            OrientedBox bay = layout.cells().get(i).bay().transformed(pos, orientation());
+            igniteSurroundings(bay);
+            if (level().isRainingAt(net.minecraft.core.BlockPos.containing(bay.center().x(), bay.center().y() + bay.halfExtents().y() + 1, bay.center().z()))
+                    && random.nextDouble() < 0.1 && cell.extinguish()) {
+                changed = true; // дождь потушил
+                continue;
+            }
+            List<String> lost = new java.util.ArrayList<>();
+            for (PartInstance p : visibleParts()) {
+                for (OrientedBox b : p.hullShapes()) {
+                    // деталь касается отсека: её центр не дальше 1,5 м от стенок горящего мешка
+                    if (bay.distanceTo(b.transformed(pos, orientation()).center()) <= 1.5) {
+                        lost.addAll(damage().hit(p.slot(), FIRE_DAMAGE_PER_S));
+                        break;
+                    }
+                }
+            }
+            for (int k = 0; k < flight.cells().size(); k++) {
+                if (k == i || !cellPresent(k) || flight.cells().get(k).burning()) continue;
+                OrientedBox other = layout.cells().get(k).bay().transformed(pos, orientation());
+                if (other.distanceTo(bay.center()) <= bay.halfExtents().length() + 1.5 && random.nextDouble() < 0.15) {
+                    pendingIgnition.add(k);
+                }
+            }
+            onDestroyed(lost, null, true);
+        }
+        if (changed || tickCount % 20 == 0 && anyBurning()) syncDamage();
+    }
+
+    /**
+     * Огонь горящего мешка (D-153): кто внутри отсека или в 1,5 м от него — загорается на 4 с; под мешком на
+     * ближайшей опоре (до 8 м вниз) с вероятностью 30 % в секунду появляется огонь, если там горит.
+     */
+    private void igniteSurroundings(OrientedBox bay) {
+        Vec3d c = bay.center(), h = bay.halfExtents();
+        AABB area = new AABB(c.x() - h.length() - 1.5, c.y() - h.length() - 1.5, c.z() - h.length() - 1.5,
+                c.x() + h.length() + 1.5, c.y() + h.length() + 1.5, c.z() + h.length() + 1.5);
+        for (Entity e : level().getEntities(this, area, x -> !(x instanceof AirshipEntity) && !x.fireImmune())) {
+            if (bay.distanceTo(new Vec3d(e.getX(), e.getY() + e.getBbHeight() / 2, e.getZ())) <= 1.5) e.igniteForSeconds(4);
+        }
+        if (random.nextDouble() >= 0.3) return;
+        double x = c.x() + (random.nextDouble() * 2 - 1) * h.x(), z = c.z() + (random.nextDouble() * 2 - 1) * h.z();
+        int y0 = (int) Math.floor(c.y() - h.y());
+        for (int y = y0; y > y0 - 8; y--) {
+            var at = net.minecraft.core.BlockPos.containing(x, y, z);
+            if (!level().getBlockState(at).isAir()) {
+                var above = at.above();
+                if (level().getBlockState(above).isAir()
+                        && net.minecraft.world.level.block.BaseFireBlock.canBePlacedAt(level(), above, net.minecraft.core.Direction.UP)) {
+                    level().setBlockAndUpdate(above, net.minecraft.world.level.block.BaseFireBlock.getState(level(), above));
+                }
+                return;
+            }
+        }
+    }
+
+    /** Пламя и дым над горящими камерами (клиент). */
+    private void spawnFireParticles() {
+        Vec3d pos = new Vec3d(getX(), getY(), getZ());
+        for (int i = 0; i < cellBurning.length && i < layout.cells().size(); i++) {
+            if (!cellBurning[i]) continue;
+            OrientedBox bay = layout.cells().get(i).bay();
+            Vec3d h = bay.halfExtents();
+            for (int k = 0; k < 6; k++) {
+                Vec3d local = bay.center().add(new Vec3d((random.nextDouble() * 2 - 1) * h.x(), (random.nextDouble() * 2 - 1) * h.y(),
+                        (random.nextDouble() * 2 - 1) * h.z()));
+                Vec3d w = pos.add(orientation().rotate(local));
+                level().addParticle(net.minecraft.core.particles.ParticleTypes.FLAME, w.x(), w.y(), w.z(), 0, 0.05, 0);
+            }
+            Vec3d top = pos.add(orientation().rotate(bay.center().add(new Vec3d(0, h.y(), 0))));
+            level().addParticle(net.minecraft.core.particles.ParticleTypes.LARGE_SMOKE, top.x(), top.y(), top.z(), 0, 0.08, 0);
+        }
     }
 
     public void setLayoutById(String id) {
@@ -275,8 +921,37 @@ public class AirshipEntity extends Entity {
         t.putFloat("bf", bow == null ? 0 : (float) bow.massKg());
         t.putFloat("ba", stern == null ? 0 : (float) stern.massKg());
         t.putFloat("pitch", (float) Math.toDegrees(flight.body().orientation().pitchRad()));
+        t.putBoolean("auto", flight.autoTrim());
+        var ap = flight.autopilot();
+        t.putBoolean("ap", ap.engaged());
+        t.putFloat("apH", (float) ap.headingDeg());
+        t.putFloat("apA", (float) ap.altitudeM());
+        t.putFloat("hdg", (float) flight.headingDeg());
+        t.putBoolean("moored", flight.mooringAnchor() != null);
+        Vec3d wind = env.wind(new Vec3d(getX(), getY(), getZ()));
+        t.putFloat("wx", (float) wind.x());
+        t.putFloat("wz", (float) wind.z());
+        Vec3d air = flight.body().velocity().sub(wind);
+        t.putFloat("air", (float) Math.hypot(air.x(), air.z()));
+        // моторы: борт, фактическая доля мощности и куда она тянется (телеграф + поправка от руля)
+        ListTag eng = new ListTag();
+        for (var e : engines) {
+            CompoundTag c = new CompoundTag();
+            c.putBoolean("port", e.mount().thrustPoint().z() < 0);
+            c.putFloat("t", (float) e.throttle());
+            c.putFloat("g", (float) e.targetThrottle());
+            c.putFloat("fuel", (float) e.fuelKg());
+            c.putFloat("flow", (float) e.fuelFlowKgPerS());
+            eng.add(c);
+        }
+        t.put("eng", eng);
+        ListTag fills = new ListTag();
+        for (int i = 0; i < cellFill.length; i++) fills.add(net.minecraft.nbt.FloatTag.valueOf(cellFill[i]));
+        t.put("fills", fills);
+        double ph = flight.pressureHeightMeters(env);
+        t.putFloat("ph", Double.isNaN(ph) ? -1 : (float) ph);
         double people = 0;
-        for (FlightModel.Payload p : flight.payload()) people += p.massKg();
+        people += flight.crewMassKg();
         t.putFloat("p", (float) people);
         t.putBoolean("v", flight.venting());
         float fill = 0;
@@ -305,7 +980,9 @@ public class AirshipEntity extends Entity {
             people.add(new FlightModel.Payload(flight.body().worldToLocal(new Vec3d(e.getX(), e.getY(), e.getZ())), massOf(e)));
             if (e instanceof net.minecraft.world.entity.player.Player) crew = true;
         }
-        flight.setPayload(people);
+        double kg = 0;
+        for (FlightModel.Payload p : people) kg += p.massKg();
+        flight.setCrewMass(kg); // в центр масс корабля, без наклона (D-141)
         return crew;
     }
 
@@ -354,7 +1031,7 @@ public class AirshipEntity extends Entity {
         if (level() instanceof net.minecraft.server.level.ServerLevel sl) {
             com.airshipvoyage.world.ShipRecords.get(sl).put(new com.airshipvoyage.world.ShipRecords.Entry(getUUID(),
                     flight.layout().id(), Math.round(getX() * 10) / 10.0, Math.round(getY() * 10) / 10.0,
-                    Math.round(getZ() * 10) / 10.0, sl.getGameTime(), construction != null));
+                    Math.round(getZ() * 10) / 10.0, sl.getGameTime(), construction != null, wreck));
         }
     }
 
@@ -512,6 +1189,12 @@ public class AirshipEntity extends Entity {
             });
         } else if (DATA_CONSTRUCTION.equals(key)) {
             applyConstructionTag();
+        } else if (DATA_DAMAGE.equals(key)) {
+            CompoundTag d = entityData.get(DATA_DAMAGE);
+            damage().restore(java.util.Map.of(), readStrings(d, "gone"));
+            applyDamageState();
+            cellBurning = new boolean[layout.cells().size()];
+            for (int i : d.getIntArray("burn")) if (i >= 0 && i < cellBurning.length) cellBurning[i] = true;
         } else if (DATA_ENGINES.equals(key)) {
             CompoundTag et = entityData.get(DATA_ENGINES);
             ListTag t = et.getList("t", Tag.TAG_FLOAT);
@@ -581,6 +1264,7 @@ public class AirshipEntity extends Entity {
     private void tickServer() {
         RigidBody body = flight.body();
         if (tickCount % 100 == 0) updateRecord();
+        tickFire();
         // На случай, если позицию поменял кто-то извне (/tp, загрузка мира).
         Vec3d entityPos = new Vec3d(getX(), getY(), getZ());
         if (entityPos.distanceTo(body.position()) > 1e-6) body.setPosition(entityPos);
@@ -603,6 +1287,7 @@ public class AirshipEntity extends Entity {
         pausedTicks = 0;
         try {
             flight.step(DT, environment());
+            applyImpacts(flight.drainImpacts());
         } catch (IllegalStateException diverged) {
             AirshipVoyage.LOGGER.error("Airship {} physics diverged, freezing", getUUID(), diverged);
             body.freeze();
@@ -633,10 +1318,12 @@ public class AirshipEntity extends Entity {
             }
         }
         carryStandingEntities(entityPos, oldRot, p, body.orientation());
+        pushOutEntities(entityPos, oldRot);
     }
 
     private void tickClient() {
         Vec3d oldPos = new Vec3d(getX(), getY(), getZ());
+        spawnFireParticles();
         // руль доходит до присланного значения со скоростью рулевой машинки (15°/с = 0,75° за тик)
         rudderShownO = rudderShown;
         elevatorShownO = elevatorShown;
@@ -667,6 +1354,7 @@ public class AirshipEntity extends Entity {
         // Коробка зависит от ориентации — пересчитываем каждый тик.
         reapplyPosition();
         carryStandingEntities(oldPos, oldRot, new Vec3d(getX(), getY(), getZ()), orientation);
+        pushOutEntities(oldPos, oldRot);
     }
 
     // ------------------------------------------------------------------ перенос стоящих на борту (ТЗ, 12.3)
@@ -818,6 +1506,21 @@ public class AirshipEntity extends Entity {
         } else if (construction != null) {
             setConstruction(null);
         }
+        wreck = tag.getBoolean("Wreck");
+        // повреждения (AV-030): после газа — разрушенные камеры опустошаются, горящие горят дальше
+        if (tag.contains("Damage", Tag.TAG_COMPOUND)) {
+            CompoundTag d = tag.getCompound("Damage");
+            java.util.Map<String, Double> taken = new java.util.HashMap<>();
+            CompoundTag t = d.getCompound("taken");
+            for (String k : t.getAllKeys()) taken.put(k, t.getDouble(k));
+            damage().restore(taken, readStrings(d, "gone"));
+            for (int i : d.getIntArray("burn")) {
+                if (i >= 0 && i < flight.cells().size()) flight.cells().get(i).restoreState(false, true);
+            }
+        } else {
+            damage = null;
+        }
+        applyDamageState();
         reapplyPosition();
         // Ревью №2: данные для клиентов должны совпадать с физикой сразу после загрузки,
         // а не после первого тика — корабль в неактивной зоне может долго не получать тиков.
@@ -866,7 +1569,20 @@ public class AirshipEntity extends Entity {
             if (e == null) continue;
             com.airshipvoyage.core.propulsion.Telegraph.byKey(c.getString("Telegraph")).ifPresent(e::setTelegraph);
             e.setThrottle(c.getDouble("Throttle"));
+            if (c.contains("Fuel")) e.setFuelKg(c.getDouble("Fuel")); // старые сохранения — полный бак
         }
+        flight.massChanged();
+        if (tag.contains("Autopilot", Tag.TAG_COMPOUND)) {
+            CompoundTag a = tag.getCompound("Autopilot");
+            flight.autopilot().restore(true, a.getDouble("Heading"), a.getDouble("Altitude"));
+        } else {
+            flight.autopilot().disengage();
+        }
+        ListTag mo = tag.getList("Mooring", Tag.TAG_DOUBLE);
+        if (mo.size() == 4) flight.restoreMooring(new Vec3d(mo.getDouble(0), mo.getDouble(1), mo.getDouble(2)), mo.getDouble(3));
+        else flight.unmoor();
+        syncMooring();
+        flight.setAutoTrim(!tag.contains("AutoTrim") || tag.getBoolean("AutoTrim")); // старые сохранения — включён
         ListTag rudders = tag.getList("Rudders", Tag.TAG_DOUBLE);
         if (rudders.size() == 4) {
             flight.restoreRudders(rudders.getDouble(0), rudders.getDouble(1), rudders.getDouble(2), rudders.getDouble(3));
@@ -891,6 +1607,16 @@ public class AirshipEntity extends Entity {
         RigidBody body = flight.body();
         tag.putString("Layout", layout.id());
         if (construction != null) tag.put("Construction", strings(construction.installed()));
+        if (wreck) tag.putBoolean("Wreck", true);
+        if (damage != null && (!damage.destroyed().isEmpty() || !damage.damageTaken().isEmpty() || anyBurning())) {
+            CompoundTag d = new CompoundTag();
+            CompoundTag taken = new CompoundTag();
+            damage.damageTaken().forEach(taken::putDouble);
+            d.put("taken", taken);
+            d.put("gone", strings(damage.destroyed()));
+            d.putIntArray("burn", burningIndices());
+            tag.put("Damage", d);
+        }
         tag.putBoolean("Neutral", flight.neutral());
         ListTag cells = new ListTag();
         for (GasCell cell : flight.cells()) {
@@ -911,15 +1637,28 @@ public class AirshipEntity extends Entity {
             ballast.add(c);
         }
         tag.put("Ballast", ballast);
+        tag.putBoolean("AutoTrim", flight.autoTrim());
         ListTag engines = new ListTag();
         for (var e : flight.engines()) {
             CompoundTag c = new CompoundTag();
             c.putString("Id", e.id());
             c.putString("Telegraph", e.telegraph().key());
             c.putDouble("Throttle", e.throttle());
+            c.putDouble("Fuel", e.fuelKg());
             engines.add(c);
         }
         tag.put("Engines", engines);
+        var ap = flight.autopilot();
+        if (ap.engaged()) {
+            CompoundTag a = new CompoundTag();
+            a.putDouble("Heading", ap.headingDeg());
+            a.putDouble("Altitude", ap.altitudeM());
+            tag.put("Autopilot", a);
+        }
+        if (flight.mooringAnchor() != null) {
+            Vec3d m = flight.mooringAnchor();
+            tag.put("Mooring", doubles(m.x(), m.y(), m.z(), flight.ropeLength()));
+        }
         // рули (ТЗ 8.5): команды и фактические отклонения
         tag.put("Rudders", doubles(flight.rudderCommandDeg(), flight.rudderDeg(),
                 flight.elevatorCommandDeg(), flight.elevatorDeg()));

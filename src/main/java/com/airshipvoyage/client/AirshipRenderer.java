@@ -87,7 +87,8 @@ public class AirshipRenderer extends EntityRenderer<AirshipEntity> {
                     layout.cells().get(i).fillingPort(), packedLight, 0xFF55CCEE);
         }
         drawPropellers(ship, partialTick, last, buffers, packedLight);
-        if (ship.isUnderConstruction()) drawGhosts(ship, partialTick, last, buffers, packedLight);
+        drawMooringRope(ship, partialTick, last, buffers, packedLight, q);
+        if (ship.installState() != null) drawGhosts(ship, partialTick, last, buffers, packedLight);
         pose.popPose();
         super.render(ship, entityYaw, partialTick, pose, buffers, packedLight);
     }
@@ -99,17 +100,28 @@ public class AirshipRenderer extends EntityRenderer<AirshipEntity> {
     private void drawPropellers(AirshipEntity ship, float partialTick, PoseStack.Pose pose, MultiBufferSource buffers, int light) {
         var engines = ship.layout().engines();
         if (engines.isEmpty()) return;
-        VertexConsumer vc = buffers.getBuffer(RenderType.entityCutout(materialTexture("walkway")));
+        // буфер брать прямо перед рисованием: взятый буфер другого RenderType закрывает предыдущий
+        // («Not building!» — вылет 10.11.2026 при /airship spawn)
         for (int i = 0; i < engines.size(); i++) {
             var mount = engines.get(i);
-            if (ship.isUnderConstruction() && !ship.construction().isInstalled(mount.slot())) continue;
-            Vec3d hub = mount.thrustPoint().add(mount.axis().scale(0.06));
+            if (ship.visibleParts().stream().noneMatch(p -> p.slot().equals(mount.slot()))) continue; // гондолы нет
+            // винт — снаружи торца гондолы: перед тянущим, за толкающим (D-139)
+            Vec3d pod = podCentre(ship.layout(), mount.slot());
+            double out = pod == null || mount.thrustPoint().sub(pod).dot(mount.axis()) >= 0 ? 0.06 : -0.06;
+            Vec3d hub = mount.thrustPoint().add(mount.axis().scale(out));
             double angle = ship.propAngle(i, partialTick);
-            for (int blade = 0; blade < 2; blade++) {
-                Quat spin = Quat.fromAxisAngle(mount.axis(), angle + blade * Math.PI / 2);
-                drawBox(pose, vc, new OrientedBox(hub, new Vec3d(0.04, 0.85, 0.08), spin), light, 0xFFFFFFFF);
-            }
+            // двухлопастный деревянный винт 1,8 м и стальная ступица; текстура лопасти растянута на всю грань
+            Quat spin = Quat.fromAxisAngle(mount.axis(), angle);
+            drawBoxFit(pose, buffers.getBuffer(RenderType.entityCutout(materialTexture("propeller"))),
+                    new OrientedBox(hub, new Vec3d(0.05, 0.9, 0.11), spin), light, 0xFFFFFFFF);
+            drawBox(pose, buffers.getBuffer(RenderType.entityCutout(materialTexture("engine"))),
+                    new OrientedBox(hub, new Vec3d(0.11, 0.13, 0.13), spin), light, 0xFFFFFFFF);
         }
+    }
+
+    private static Vec3d podCentre(ShipLayout layout, String slot) {
+        for (PartInstance p : layout.parts()) if (p.slot().equals(slot)) return p.localPosition();
+        return null;
     }
 
     private static com.airshipvoyage.core.structure.ControlSurface surfaceOf(ShipLayout layout, String slot) {
@@ -135,6 +147,24 @@ public class AirshipRenderer extends EntityRenderer<AirshipEntity> {
         drawBox(pose, vc, new OrientedBox(centre, new Vec3d(half * 0.98, h.y() * 0.96, h.z() * 0.9), turn), light, 0xFFE8DCC0);
     }
 
+    /** Трос от носа к голове мачты (AV-038): тонкая коробка вдоль отрезка, в осях корпуса. */
+    private void drawMooringRope(AirshipEntity ship, float partialTick, PoseStack.Pose pose, MultiBufferSource buffers, int light, Quat q) {
+        Vec3d anchor = ship.mooringAnchorForRender();
+        if (anchor == null) return;
+        Vec3 sp = ship.getPosition(partialTick);
+        Vec3d local = q.inverseRotate(anchor.sub(new Vec3d(sp.x, sp.y, sp.z)));
+        Vec3d nose = new Vec3d(ship.layout().localBoundsMax().x(), 0, 0);
+        Vec3d d = local.sub(nose);
+        double len = d.length();
+        if (len < 1e-3) return;
+        Vec3d dir = d.scale(1 / len);
+        Vec3d axis = Vec3d.UNIT_X.cross(dir);
+        double angle = Math.acos(Math.max(-1, Math.min(1, dir.x())));
+        Quat rot = axis.length() < 1e-9 ? Quat.IDENTITY : Quat.fromAxisAngle(axis.normalized(), angle);
+        drawBox(pose, buffers.getBuffer(RenderType.entityCutout(materialTexture("rope"))),
+                new OrientedBox(nose.add(d.scale(0.5)), new Vec3d(len / 2, 0.04, 0.04), rot), light, 0xFFFFFFFF);
+    }
+
     private ResourceLocation materialTexture(String material) {
         return textures.computeIfAbsent(material, AirshipRenderer::texture);
     }
@@ -151,7 +181,7 @@ public class AirshipRenderer extends EntityRenderer<AirshipEntity> {
      */
     private void drawGhosts(AirshipEntity ship, float partialTick, PoseStack.Pose pose, MultiBufferSource buffers, int light) {
         Player player = Minecraft.getInstance().player;
-        ConstructionState state = ship.construction();
+        ConstructionState state = ship.installState();
         if (player == null || state == null) return;
         String held = heldPartKey(player);
         Vec3 sp = ship.getPosition(partialTick);
@@ -235,6 +265,21 @@ public class AirshipRenderer extends EntityRenderer<AirshipEntity> {
         face(pose, vc, c.sub(ay), ax, az, r.rotate(Vec3d.UNIT_Y).negate(), sx, sz, light, argb);        // −Y
         face(pose, vc, c.add(az), ax, ay, r.rotate(Vec3d.UNIT_Z), sx, sy, light, argb);                 // +Z (правый борт)
         face(pose, vc, c.sub(az), ax.negate(), ay, r.rotate(Vec3d.UNIT_Z).negate(), sx, sy, light, argb); // −Z
+    }
+
+    /** Коробка, у которой текстура натянута на каждую грань целиком (0…1), а не повторяется по метрам. */
+    private static void drawBoxFit(PoseStack.Pose pose, VertexConsumer vc, OrientedBox box, int light, int argb) {
+        Vec3d c = box.center(), h = box.halfExtents();
+        Quat r = box.rotation();
+        Vec3d ax = r.rotate(new Vec3d(h.x(), 0, 0));
+        Vec3d ay = r.rotate(new Vec3d(0, h.y(), 0));
+        Vec3d az = r.rotate(new Vec3d(0, 0, h.z()));
+        face(pose, vc, c.add(ax), az.negate(), ay, r.rotate(Vec3d.UNIT_X), 1, 1, light, argb);
+        face(pose, vc, c.sub(ax), az, ay, r.rotate(Vec3d.UNIT_X).negate(), 1, 1, light, argb);
+        face(pose, vc, c.add(ay), ax, az.negate(), r.rotate(Vec3d.UNIT_Y), 1, 1, light, argb);
+        face(pose, vc, c.sub(ay), ax, az, r.rotate(Vec3d.UNIT_Y).negate(), 1, 1, light, argb);
+        face(pose, vc, c.add(az), ax, ay, r.rotate(Vec3d.UNIT_Z), 1, 1, light, argb);
+        face(pose, vc, c.sub(az), ax.negate(), ay, r.rotate(Vec3d.UNIT_Z).negate(), 1, 1, light, argb);
     }
 
     /**

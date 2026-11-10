@@ -78,7 +78,7 @@ public final class ConstructionSites {
         AABB area = new AABB(eye, eye).inflate(reach + 1);
         Aim best = null;
         for (AirshipEntity ship : ShipRegistry.shipsIntersecting(level, area)) {
-            ConstructionState state = ship.construction();
+            ConstructionState state = ship.installState();
             if (state == null) continue;
             var t = AssemblyTargeting.find(state, pos(ship), ship.orientation(), vec(eye), vec(look).normalized(), reach, itemKey);
             if (t.isPresent() && (best == null || t.get().distance() < best.target().distance())) best = new Aim(ship, t.get());
@@ -108,7 +108,9 @@ public final class ConstructionSites {
             }
         }
 
-        ConstructionState.Check check = ship.construction().check(step.slot(), itemKey);
+        ConstructionState state = ship.installState();
+        if (state == null) return InstallResult.of(Outcome.NO_TARGET);
+        ConstructionState.Check check = state.check(step.slot(), itemKey);
         if (!check.ok()) {
             // WRONG_ITEM / ALREADY_INSTALLED сюда не доходят: выбор взглядом их уже отсеял
             return new InstallResult(Outcome.MISSING_SUPPORT, step.slot(), check.missing(), null);
@@ -119,12 +121,18 @@ public final class ConstructionSites {
         if (blocked != null) return new InstallResult(Outcome.OCCUPIED_BY_BLOCK, step.slot(), List.of(), blocked);
         if (entityInside(level, shapes, ship)) return new InstallResult(Outcome.OCCUPIED_BY_ENTITY, step.slot(), List.of(), null);
 
-        ship.construction().install(step.slot(), itemKey);
-        ship.constructionChanged();
+        boolean site = ship.isUnderConstruction();
+        if (site) {
+            ship.construction().install(step.slot(), itemKey);
+            ship.constructionChanged();
+        } else {
+            ship.repairSlot(step.slot()); // ремонт летающего корабля (AV-033)
+        }
         if (!player.hasInfiniteMaterials()) stack.shrink(1);
         level.playSound(null, hitPoint.x, hitPoint.y, hitPoint.z,
                 step.kind() == AssemblyPlan.Kind.CELL ? SoundEvents.WOOL_PLACE : SoundEvents.ANVIL_PLACE,
                 SoundSource.BLOCKS, step.kind() == AssemblyPlan.Kind.CELL ? 1.0F : 0.4F, 1.3F);
+        if (!site) return new InstallResult(Outcome.INSTALLED, step.slot(), List.of(), null);
         return new InstallResult(ship.construction().complete() ? Outcome.COMPLETED : Outcome.INSTALLED,
                 step.slot(), List.of(), null);
     }
@@ -133,7 +141,7 @@ public final class ConstructionSites {
     public static List<OrientedBox> worldShapes(AirshipEntity ship, String slot) {
         Vec3d p = pos(ship);
         Quat q = ship.orientation();
-        return ship.construction().plan().shapesOf(slot).stream().map(b -> b.transformed(p, q)).toList();
+        return ship.installState().plan().shapesOf(slot).stream().map(b -> b.transformed(p, q)).toList();
     }
 
     /** Первый блок с коллизией, пересекающий формы детали (по точной форме блока). */

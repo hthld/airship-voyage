@@ -217,15 +217,15 @@ def engine():
     s.line('steel', 12.5, 1.0, 11.5, 6.0, 1.2)
     s.fill('olive', lambda x, y: ((x - 9.0) / 5.6) ** 2 + ((y - 9.0) / 3.1) ** 2 <= 1)  # гондола
     s.rect('iron', 3, 7, 4, 10)                     # радиатор спереди
-    s.line('wood', 1.6, 1.8, 1.6, 15.0, 1.8)        # винт
-    s.rect('dark', 1, 8, 2, 9)                      # ступица
+    s.line('wood', 14.4, 1.8, 14.4, 15.0, 1.8)      # толкающий винт на корме гондолы (D-139)
+    s.rect('dark', 13, 8, 14, 9)                    # ступица
     img = s.render()
     for x in (8, 11):                               # окна
         img.putpixel((x, 8), hex_rgba('#a9d6e8'))
         img.putpixel((x, 9), hex_rgba('#5d8ea3'))
     for x in range(6, 14):
         img.putpixel((x, 11), hex_rgba(MAT['olive'][1]))
-    img.putpixel((14, 7), hex_rgba('#2a2a2a'))       # выхлоп
+    img.putpixel((12, 6), hex_rgba('#2a2a2a'))       # выхлоп
     return img
 
 
@@ -349,12 +349,115 @@ def table_side():
     return img
 
 
+def repair_kit():
+    s = Sprite()
+    s.rect('skin', 2, 5, 13, 13)          # свёрток заплат (ткань оболочки)
+    s.rect('rope', 2, 8, 13, 9)           # перевязка
+    img = s.render(inner_edges=True)
+    for (x, y) in [(4, 6), (8, 6), (11, 11), (5, 11)]:
+        img.putpixel((x, y), hex_rgba(MAT['skin'][1]))   # стёжки
+    for i in range(7):                     # игла с ниткой наискосок
+        img.putpixel((8 + i, 7 - i), hex_rgba(MAT['steel'][3] if i < 5 else MAT['steel'][1]))
+    img.putpixel((14, 1), hex_rgba(MAT['steel'][0]))
+    for (x, y) in [(7, 8), (6, 9), (6, 10), (7, 11)]:
+        img.putpixel((x, y), hex_rgba('#e8e2d0'))       # нитка
+    for (x, y, t) in [(1, 3, 2), (2, 2, 3), (3, 3, 2)]:  # латунная пряжка-клёпка
+        img.putpixel((x, y), hex_rgba(MAT['brass'][t]))
+    return img
+
+
+def extinguisher():
+    s = Sprite()
+    s.fill('red', lambda x, y: 5 <= x <= 10 and 4 <= y <= 15 and not ((x in (5, 10)) and y in (4, 15)))
+    s.rect('brass', 6, 1, 9, 3)                    # головка
+    img = s.render()
+    for y in range(6, 14):                         # блик
+        img.putpixel((6, y), hex_rgba(MAT['red'][3]))
+    for x in range(6, 10):                         # латунный пояс
+        img.putpixel((x, 9), hex_rgba(MAT['brass'][2]))
+    for (x, y) in [(10, 2), (11, 2), (12, 3), (13, 4), (13, 5)]:   # шланг с раструбом
+        img.putpixel((x, y), hex_rgba(MAT['dark'][2]))
+    img.putpixel((13, 6), hex_rgba(MAT['dark'][0]))
+    img.putpixel((14, 6), hex_rgba(MAT['dark'][0]))
+    return img
+
+
+def canister():
+    s = Sprite()
+    s.rect('red', 3, 4, 12, 14)
+    s.rect('red', 9, 2, 11, 3)            # горловина
+    s.rect('iron', 4, 1, 7, 3)            # ручка
+    img = s.render(inner_edges=True)
+    for (x, y) in [(5, 6), (6, 7), (7, 8), (8, 9), (9, 10), (10, 11), (10, 6), (9, 7), (6, 10), (5, 11)]:
+        img.putpixel((x, y), hex_rgba(MAT['red'][1]))   # тиснёный крест, как на старых канистрах
+    for y in range(5, 14):
+        img.putpixel((4, y), hex_rgba(MAT['red'][3]))
+    img.putpixel((10, 1), hex_rgba(MAT['brass'][2]))    # крышка
+    return img
+
+
+def mast_side():
+    img = Image.new('RGBA', (16, 16), hex_rgba(MAT['iron'][2]))
+    for y in range(16):
+        for x in range(16):
+            c = MAT['iron'][2]
+            if x in (0, 15) or y in (0, 15):
+                c = MAT['iron'][0]
+            elif (x + y) % 5 == 0 or (x - y) % 5 == 0:
+                c = MAT['iron'][3]                       # решётка
+            img.putpixel((x, y), hex_rgba(c))
+    for x in range(1, 15):
+        img.putpixel((x, 2), hex_rgba(MAT['brass'][2]))
+        img.putpixel((x, 3), hex_rgba(MAT['brass'][1]))
+    return img
+
+
+def mast_top():
+    img = Image.new('RGBA', (16, 16), hex_rgba(MAT['iron'][1]))
+    for y in range(16):
+        for x in range(16):
+            r = math.hypot(x - 7.5, y - 7.5)
+            if 4.0 <= r <= 6.0:
+                img.putpixel((x, y), hex_rgba(MAT['brass'][2] if r < 5 else MAT['brass'][1]))  # кольцо для троса
+            if x in (0, 15) or y in (0, 15):
+                img.putpixel((x, y), hex_rgba(MAT['iron'][0]))
+    return img
+
+
+def rope():
+    img = Image.new('RGBA', (16, 16), (0, 0, 0, 0))
+    for y in range(16):
+        for x in range(16):
+            img.putpixel((x, y), hex_rgba(MAT['rope'][2] if (x + y) % 4 < 2 else MAT['rope'][1]))
+    return img
+
+
+def propeller():
+    """Лопасть винта: вдоль строк — длина (концы окованы латунью), по столбцам — ширина с затенением кромок."""
+    img = Image.new('RGBA', (16, 16), (0, 0, 0, 0))
+    wood = ['#5c3a1c', '#7a4e26', '#946232', '#a8743d', '#b8854a', '#a8743d', '#946232', '#7a4e26']
+    for y in range(16):
+        for x in range(16):
+            col = wood[min(7, x // 2)] if x < 8 else wood[min(7, (15 - x) // 2)]
+            if y in (0, 1, 14, 15):
+                col = MAT['brass'][2] if 2 < x < 13 else MAT['brass'][1]
+            elif y in (2, 13):
+                col = MAT['brass'][0]
+            elif (x + y * 3) % 11 == 0:
+                col = '#6b4422'                     # волокна дерева
+            img.putpixel((x, y), hex_rgba(col))
+    return img
+
+
 ITEMS = {
     'helm': helm, 'prototype_blueprint': blueprint, 'truss_section': truss, 'ring_segment': ring,
     'keel_section': keel, 'engine_pod': engine, 'tail_fin': fin, 'folded_gas_cell': gas_cell,
     'hydrogen_supply': lambda: gas_supply('h2'), 'helium_supply': lambda: gas_supply('he'),
+    'repair_kit': repair_kit, 'fire_extinguisher': extinguisher, 'fuel_canister': canister,
 }
-BLOCKS = {'blueprint_table_top': table_top, 'blueprint_table_side': table_side}
+BLOCKS = {'blueprint_table_top': table_top, 'blueprint_table_side': table_side,
+          'mooring_mast_side': mast_side, 'mooring_mast_top': mast_top}
+ENTITY = {'propeller': propeller, 'rope': rope}
 
 
 def main():
@@ -363,6 +466,8 @@ def main():
         out[('item', name)] = fn()
     for name, fn in BLOCKS.items():
         out[('block', name)] = fn()
+    for name, fn in ENTITY.items():
+        out[('entity/ship', name)] = fn()
     for (kind, name), img in out.items():
         d = os.path.join(ASSETS, kind)
         os.makedirs(d, exist_ok=True)

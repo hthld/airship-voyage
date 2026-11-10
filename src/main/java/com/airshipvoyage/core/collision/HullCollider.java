@@ -150,7 +150,7 @@ public final class HullCollider {
         Vec3d half = boxMax.sub(boxMin).scale(0.5);
         Quat inv = shipRotation.conjugate();
         Vec3d localCenter = inv.rotate(center.sub(shipPosition));
-        Vec3d localHalf = new OrientedBox(Vec3d.ZERO, half, inv).aabbHalfExtents();
+        Vec3d localHalf = localHalfExtents(half, shipRotation);
         Aabb localBox = Aabb.ofCenter(localCenter, localHalf);
         Vec3d localMove = inv.rotate(movement);
         double upDot = shipRotation.up().y(); // cos наклона палубы
@@ -165,7 +165,38 @@ public final class HullCollider {
         Vec3d world = shipRotation.rotate(local.movement());
         // Убираем шум преобразования по осям, которые деталь не трогала (корабль не повёрнут — частый случай).
         world = new Vec3d(snap(world.x(), movement.x()), snap(world.y(), movement.y()), snap(world.z(), movement.z()));
+        Vec3d lm = local.movement();
+        if (upDot >= Math.cos(MAX_GRIP_SLOPE_RAD)
+                && Math.abs(lm.x() - localMove.x()) < 1e-9 && Math.abs(lm.z() - localMove.z()) < 1e-9) {
+            // По палубе шаг свободен — обрезана только высота (стоим на настиле). На наклонённой палубе обратный
+            // перевод давал горизонталь, отличную от желаемой на микроны; Minecraft принимал это за удар о стену
+            // (horizontalCollision) и гасил разгон каждый тик — ходьба шла на 60 % и рывками (жалоба владельца
+            // 10.11.2026, тест walkingOnTiltedDeckKeepsFullSpeed). Горизонталь — как просили, высота — по палубе.
+            // Только там, где палуба держит (до 30°): круче человек скользит, и сдвиг вбок — настоящий.
+            world = new Vec3d(movement.x(), world.y(), movement.z());
+        }
         return new Result(world, local.landed(), true);
+    }
+
+    /** До какого наклона палубы сущность считается стоящей прямо в осях корпуса (как и сцепление с палубой). */
+    public static final double UPRIGHT_TILT_RAD = MAX_GRIP_SLOPE_RAD;
+
+    /**
+     * Полуразмеры коробки сущности в осях корпуса. Раньше — обводящий AABB коробки, повёрнутой полностью:
+     * на палубе с креном/дифферентом даже в 1° нижние углы обводки уходили под настил, и каждый шаг упирался в
+     * палубу — ходьба шла на 60 % и с остановками («как на шифте», жалоба владельца 10.11.2026). Стоящий человек
+     * держится прямо относительно палубы: при наклоне до {@link #UPRIGHT_TILT_RAD} учитывается только поворот
+     * по курсу (ошибка углов — доли сантиметра), круче — по-старому, полной обводкой.
+     */
+    public static Vec3d localHalfExtents(Vec3d half, Quat shipRotation) {
+        Vec3d up = shipRotation.up();
+        if (up.y() < Math.cos(UPRIGHT_TILT_RAD)) return new OrientedBox(Vec3d.ZERO, half, shipRotation.conjugate()).aabbHalfExtents();
+        Vec3d fwd = shipRotation.forward();
+        double c = Math.abs(fwd.x()), sn = Math.abs(fwd.z()), len = Math.hypot(c, sn);
+        if (len < 1e-9) return half;
+        c /= len;
+        sn /= len;
+        return new Vec3d(half.x() * c + half.z() * sn, half.y(), half.x() * sn + half.z() * c);
     }
 
     private static double snap(double v, double original) {

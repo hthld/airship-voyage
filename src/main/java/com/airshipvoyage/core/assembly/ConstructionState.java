@@ -80,6 +80,28 @@ public final class ConstructionState {
     }
 
     public boolean isInstalled(String slot) { return installed.contains(slot); }
+
+    /**
+     * Снять деталь со стапеля (AV-019, AV-030): вместе с ней снимается всё установленное, что требовало её
+     * (по плану монтажа), — как при разборке в обратном порядке.
+     * @return снятые слоты, сам слот первым; пусто — слот не был установлен
+     */
+    public List<String> uninstall(String slot) {
+        if (!installed.remove(slot)) return List.of();
+        List<String> out = new java.util.ArrayList<>(List.of(slot));
+        boolean changed = true;
+        while (changed) {
+            changed = false;
+            for (AssemblyPlan.Step s : plan.steps()) {
+                if (installed.contains(s.slot()) && !installed.containsAll(s.requires())) {
+                    installed.remove(s.slot());
+                    out.add(s.slot());
+                    changed = true;
+                }
+            }
+        }
+        return out;
+    }
     public Set<String> installed() { return Collections.unmodifiableSet(installed); }
     public int installedCount() { return installed.size(); }
     public int totalCount() { return plan.steps().size(); }

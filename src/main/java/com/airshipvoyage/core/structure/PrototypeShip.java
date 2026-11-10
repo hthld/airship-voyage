@@ -124,7 +124,8 @@ public final class PrototypeShip {
 
     /** Тяга — по оси гондолы, у винта на её переднем торце. */
     private static EngineMount engine(String slot, double z) {
-        return new EngineMount(slot, new Vec3d(1, ENGINE_Y, z), Vec3d.UNIT_X, ENGINE);
+        // толкающий винт на кормовом торце гондолы (x = −1), как у первых цеппелинов (D-139); тяга — вперёд
+        return new EngineMount(slot, new Vec3d(-1, ENGINE_Y, z), Vec3d.UNIT_X, ENGINE);
     }
 
     /**

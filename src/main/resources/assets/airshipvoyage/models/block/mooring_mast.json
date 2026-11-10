@@ -1,0 +1,7 @@
+{
+  "parent": "minecraft:block/cube_column",
+  "textures": {
+    "end": "airshipvoyage:block/mooring_mast_top",
+    "side": "airshipvoyage:block/mooring_mast_side"
+  }
+}

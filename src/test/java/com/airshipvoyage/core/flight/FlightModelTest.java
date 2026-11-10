@@ -103,6 +103,7 @@ class FlightModelTest {
     @Test
     void leakInForwardCellPitchesNoseDownAndShipSinks() {
         FlightModel m = ship(150);
+        m.setAutoTrim(false); // физика утечки без насоса дифферента (в игре насос её парирует, D-137)
         var env = env(null);
         m.weighOff(env);
         m.cells().get(m.cellIndex("cell_fwd")).setLeakPerSecond(0.01);
@@ -472,6 +473,7 @@ class FlightModelTest {
             FlightModel m = ship(0);
             m.setPayload(List.of(new FlightModel.Payload(new Vec3d(8.6, PrototypeShip.DECK_TOP, 0), 80)));
             m.weighOff(env(null));
+            m.setAutoTrim(false); // здесь проверяется ручная перекачка
             if (k == 1) m.transferBallast("fwd", "aft", 40);
             m.setTelegraph("all", com.airshipvoyage.core.propulsion.Telegraph.FULL);
             run(m, env(null), 60);
@@ -481,6 +483,80 @@ class FlightModelTest {
                 out[0][0], out[0][1], out[1][0], out[1][1]);
         assertTrue(out[0][0] < -7, "untrimmed should dive nose-down");
         assertTrue(Math.abs(out[1][0]) < 2 && Math.abs(out[1][1]) < 0.2, "trim did not level the ship");
+    }
+
+    /**
+     * D-136, «управляемость надо улучшить»: на месте (телеграф «стоп») полный руль включает разностную тягу 0,1:
+     * правый мотор +0,1 (150 Н вперёд), левый −0,1 (задний ход — половина тяги, 75 Н назад). Момент
+     * 6,5·(150 + 75) = 1462,5 Н·м. Рули без хода не действуют; гасят вращение квадратичное демпфирование решётки
+     * 38 945·ω² и стабилизатор, поток на который при u ≈ 0 сорван (угол 0,35 рад):
+     * ½·1,225·(8,5ω)²·6·2,3·0,35·8,5 = 1817·ω². Равновесие: ω = √(1462,5 / 40 762) = 0,1894 рад/с (10,9°/с).
+     */
+    @Test
+    void differentialThrustTurnsShipOnTheSpot() {
+        FlightModel m = trimmedShip();
+        m.setRudder(30);
+        m.setDifferential(1);
+        run(m, env(null), 90);
+        double w = m.body().angularVelocity().y();
+        System.out.printf("[pivot] stop + full rudder: %.4f rad/s (%.2f deg/s), drift %.2f m/s%n", w, Math.toDegrees(w),
+                m.body().velocity().length());
+        assertEquals(0.1894, w, 0.01, "pivot turn rate");
+        // без разностной тяги на месте корабль не поворачивает
+        FlightModel r = trimmedShip();
+        r.setRudder(30);
+        run(r, env(null), 30);
+        assertEquals(0, r.body().angularVelocity().y(), 1e-9);
+    }
+
+    /**
+     * D-137 и D-138, «слишком чувствителен к моему весу»: рулевой 80 кг встаёт на нос (x = 8,6) уравновешенного
+     * корабля. Автомат дифферента перекачивает 80·8,6/16 = 43 кг в корму (насос 10 кг/с → ≈ 4,3 с); через 15 с
+     * корабль ровный. Без автомата — стоит наклонённым, но качка затухает (ζ = 0,3): за 15…25 с размах
+     * меньше 1°. Без затухания размах был ≈ 11° (от −2,7° до −14°) — найдено в разборе жалобы.
+     */
+    @Test
+    void autoTrimLevelsShipAndSwayDiesOut() {
+        for (boolean auto : new boolean[]{true, false}) {
+            FlightModel m = trimmedShip();
+            m.setAutoTrim(auto);
+            m.setPayload(List.of(new FlightModel.Payload(new Vec3d(8.6, PrototypeShip.DECK_TOP, 0), 80)));
+            double fwd0 = m.ballast().get(0).massKg();
+            run(m, env(null), 15);
+            double lo = 1e9, hi = -1e9;
+            for (int i = 0; i < 200; i++) {
+                m.step(DT, env(null));
+                double p = Math.toDegrees(m.body().orientation().pitchRad());
+                lo = Math.min(lo, p);
+                hi = Math.max(hi, p);
+            }
+            double moved = fwd0 - m.ballast().get(0).massKg();
+            System.out.printf("[trim] auto %s: pitch %.2f..%.2f deg over 15-25 s, moved %.2f kg%n", auto, lo, hi, moved);
+            assertTrue(hi - lo < 1.0, "sway not damped: " + lo + " .. " + hi);
+            if (auto) {
+                assertEquals(43, moved, 1.0, "pumped aft");
+                assertTrue(Math.abs(lo) < 1.5 && Math.abs(hi) < 1.5, "not level");
+            } else {
+                assertEquals(0, moved, 1e-9);
+                assertTrue(hi < -5, "without the pump the bow stays down");
+            }
+        }
+    }
+
+    /**
+     * «Газ работает непонятно»: приборы пишут, до какой высоты поднимется лёгкий корабль. Уравновешенный у моря
+     * прототип наполнен на 0,8957; газ раздуется до 100 %, где плотность воздуха упадёт в 0,8957 раза. Стандартная
+     * атмосфера: σ(h) = (1 − 2,25577·10⁻⁵·h)^4,2559 → h = (1 − 0,8957^(1/4,2559)) / 2,25577·10⁻⁵ ≈ 1134 м.
+     */
+    @Test
+    void pressureHeightIsWhereGasFillsTheCells() {
+        FlightModel m = trimmedShip();
+        double fill = m.fill(0, env(null));
+        double expected = (1 - Math.pow(fill, 1 / 4.2559)) / 2.25577e-5;
+        double ph = m.pressureHeightMeters(env(null));
+        System.out.printf("[gas] fill %.4f, pressure height %.1f m (ISA hand calc %.1f m)%n", fill, ph, expected);
+        assertEquals(expected, ph, 15);
+        assertTrue(Double.isNaN(ship(0).pressureHeightMeters(env(null))), "no gas — no pressure height");
     }
 
     /** Руль высоты на ходу задирает нос: +15° на полном ходу — нос выше, чем без руля, больше чем на 0,5°. */
@@ -510,6 +586,7 @@ class FlightModelTest {
     @Test
     void peopleAtTheBowPitchShipNoseDown() {
         FlightModel m = trimmedShip();
+        m.setAutoTrim(false); // проверяется статика массы людей, без насоса
         m.setPayload(List.of(new FlightModel.Payload(new Vec3d(8, -5.25, 0), 80),
                 new FlightModel.Payload(new Vec3d(8, -5.25, 0), 80)));
         var env = env(null);

@@ -29,6 +29,22 @@ public final class HelmService {
     public static final double RUDDER_DEG = 30, ELEVATOR_DEG = 20;
     /** Насос перекачки балласта нос ↔ корма, кг/с (AV-027): 40 кг — за 8 с. */
     public static final double TRIM_KG_PER_S = 5.0;
+    /** Задатчики автопилота за тик удержания клавиши: курс, градусы; высота, м. */
+    public static final double AP_HEADING_STEP = 0.5, AP_ALTITUDE_STEP = 0.25;
+
+    /** Включить или выключить автопилот (P у штурвала): включённый берёт нынешние курс и высоту. */
+    public static void toggleAutopilot(AirshipEntity ship) {
+        var flight = ship.flight();
+        if (flight.autopilot().engaged()) {
+            flight.autopilot().disengage();
+            flight.setRudder(0);
+            flight.setElevator(0);
+            flight.setDifferential(0);
+        } else {
+            flight.engageAutopilot(ship.environment());
+        }
+    }
+
     /** Шаг сервера, с. */
     private static final double DT = 0.05;
     /** ID типа детали-поста. */
@@ -97,6 +113,7 @@ public final class HelmService {
         ship.setHelmsman(null);
         ship.flight().setRudder(0);
         ship.flight().setElevator(0);
+        ship.flight().setDifferential(0);
         if (ship.helmVentCommand()) ship.flight().setVenting(false);
         ship.setHelmVentCommand(false);
     }
@@ -118,13 +135,33 @@ public final class HelmService {
      */
     public static boolean apply(Player player, AirshipEntity ship, int telegraphStep, double rudderDeg, double elevatorDeg,
                                 boolean venting, boolean dropBallast, int trim) {
+        return apply(player, ship, telegraphStep, rudderDeg, elevatorDeg, venting, dropBallast, trim, false, false);
+    }
+
+    /**
+     * @param stop       все моторы — «стоп» сразу, без перебора ступеней
+     * @param toggleAuto включить/выключить автомат дифферента
+     */
+    public static boolean apply(Player player, AirshipEntity ship, int telegraphStep, double rudderDeg, double elevatorDeg,
+                                boolean venting, boolean dropBallast, int trim, boolean stop, boolean toggleAuto) {
         if (!player.getUUID().equals(ship.helmsman()) || !nearHelm(player, ship)) return false;
         var flight = ship.flight();
         if (telegraphStep != 0 && !flight.engines().isEmpty()) {
             flight.setTelegraph("all", flight.engines().get(0).telegraph().step(telegraphStep));
         }
-        flight.setRudder(rudderDeg);
-        flight.setElevator(elevatorDeg);
+        if (stop) flight.setTelegraph("all", com.airshipvoyage.core.propulsion.Telegraph.STOP);
+        var ap = flight.autopilot();
+        if (ap.engaged()) {
+            // при автопилоте A/D и пробел/Ctrl крутят задатчики: курс 0,5°/тик (10°/с), высота 0,25 м/тик (5 м/с)
+            ap.setHeading(ap.headingDeg() + Math.signum(rudderDeg) * AP_HEADING_STEP);
+            ap.setAltitude(ap.altitudeM() + Math.signum(elevatorDeg) * AP_ALTITUDE_STEP);
+        } else {
+            flight.setRudder(rudderDeg);
+            // руль с поста включает и разностную тягу моторов: поворот и на малом ходу, и на месте (D-136)
+            flight.setDifferential(rudderDeg / RUDDER_DEG);
+        }
+        if (toggleAuto) flight.setAutoTrim(!flight.autoTrim());
+        if (!ap.engaged()) flight.setElevator(elevatorDeg);
         // клапаны — только при смене команды V: иначе каждый тик «закрыто» с поста перебивало бы
         // клапан, открытый у штуцера камеры
         if (venting != ship.helmVentCommand()) {
@@ -132,6 +169,7 @@ public final class HelmService {
             ship.setHelmVentCommand(venting);
         }
         if (trim != 0) {
+            flight.setAutoTrim(false); // ручная перекачка — автомат отключается, чтобы не спорить с рулевым
             var bow = flight.endBallast(true);
             var stern = flight.endBallast(false);
             if (bow != null && stern != null && bow != stern) {

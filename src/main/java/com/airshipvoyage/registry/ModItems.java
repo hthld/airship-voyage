@@ -20,6 +20,17 @@ public final class ModItems {
             "helium_supply", p -> new com.airshipvoyage.gas.GasSupplyItem(
                     com.airshipvoyage.core.physics.LiftingGas.HELIUM, p), new Item.Properties().stacksTo(1));
 
+    public static final DeferredItem<com.airshipvoyage.damage.RepairKitItem> REPAIR_KIT = ITEMS.registerItem("repair_kit",
+            com.airshipvoyage.damage.RepairKitItem::new, new Item.Properties().stacksTo(16));
+
+    public static final DeferredItem<com.airshipvoyage.damage.FireExtinguisherItem> FIRE_EXTINGUISHER = ITEMS.registerItem(
+            "fire_extinguisher", com.airshipvoyage.damage.FireExtinguisherItem::new, new Item.Properties().durability(8));
+
+    public static final DeferredItem<com.airshipvoyage.control.FuelCanisterItem> FUEL_CANISTER = ITEMS.registerItem(
+            "fuel_canister", com.airshipvoyage.control.FuelCanisterItem::new, new Item.Properties().stacksTo(1));
+
+    public static final DeferredItem<BlockItem> MOORING_MAST = ITEMS.registerSimpleBlockItem("mooring_mast", ModBlocks.MOORING_MAST);
+
     public static final DeferredItem<BlockItem> BLUEPRINT_TABLE =
             ITEMS.registerSimpleBlockItem("blueprint_table", ModBlocks.BLUEPRINT_TABLE);
 

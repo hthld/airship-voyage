@@ -58,7 +58,12 @@ public final class ShipLayout {
             }
         }
         List<OrientedBox> shapes = new ArrayList<>();
-        for (PartInstance p : this.parts) shapes.addAll(p.hullShapes());
+        List<String> owners = new ArrayList<>();
+        for (PartInstance p : this.parts) {
+            shapes.addAll(p.hullShapes());
+            for (int k = 0; k < p.hullShapes().size(); k++) owners.add(p.slot());
+        }
+        this.shapeOwners = List.copyOf(owners);
         this.hullShapes = Collections.unmodifiableList(shapes);
 
         double[] mn = {Double.MAX_VALUE, Double.MAX_VALUE, Double.MAX_VALUE};
@@ -96,6 +101,11 @@ public final class ShipLayout {
             sampleShapes[i] = java.util.Arrays.copyOf(own, n);
         }
     }
+
+    private final List<String> shapeOwners;
+
+    /** Деталь, которой принадлежит форма {@code shapeIndex} из {@link #hullShapes()}. */
+    public String shapeOwner(int shapeIndex) { return shapeOwners.get(shapeIndex); }
 
     /** Для каждой точки контакта — индексы форм ({@link #hullShapes()}), на поверхности которых она лежит. */
     private final int[][] sampleShapes;

@@ -1,0 +1,21 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "pattern": [
+    "TIT",
+    "I I",
+    "TIT"
+  ],
+  "key": {
+    "T": {
+      "item": "airshipvoyage:truss_section"
+    },
+    "I": {
+      "item": "minecraft:iron_ingot"
+    }
+  },
+  "result": {
+    "id": "airshipvoyage:ring_segment",
+    "count": 1
+  }
+}

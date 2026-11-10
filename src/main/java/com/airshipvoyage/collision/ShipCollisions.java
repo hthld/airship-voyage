@@ -85,7 +85,7 @@ public final class ShipCollisions {
     private static List<HullCollider.Ship> shipShapes(List<AirshipEntity> ships) {
         List<HullCollider.Ship> out = new ArrayList<>(ships.size());
         for (AirshipEntity ship : ships) {
-            out.add(new HullCollider.Ship(new Vec3d(ship.getX(), ship.getY(), ship.getZ()), ship.orientation(), ship.hullShapes()));
+            out.add(new HullCollider.Ship(new Vec3d(ship.getX(), ship.getY(), ship.getZ()), ship.orientation(), ship.entityShapes()));
         }
         return out;
     }
@@ -154,7 +154,7 @@ public final class ShipCollisions {
             Vec3d h = new com.airshipvoyage.core.math.OrientedBox(Vec3d.ZERO,
                     new Vec3d(box.getXsize() / 2, box.getYsize() / 2, box.getZsize() / 2), inv).aabbHalfExtents();
             Vec3d lo = c.sub(h), hi = c.add(h);
-            for (var s : ship.hullShapes()) {
+            for (var s : ship.entityShapes()) {
                 Vec3d sMin = s.aabbMin(), sMax = s.aabbMax();
                 if (lo.x() < sMax.x() && hi.x() > sMin.x() && lo.y() < sMax.y() && hi.y() > sMin.y()
                         && lo.z() < sMax.z() && hi.z() > sMin.z()) {

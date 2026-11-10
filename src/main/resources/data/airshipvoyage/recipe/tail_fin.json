@@ -1,0 +1,21 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "pattern": [
+    "TWW",
+    "TWW",
+    "T  "
+  ],
+  "key": {
+    "T": {
+      "item": "airshipvoyage:truss_section"
+    },
+    "W": {
+      "tag": "minecraft:wool"
+    }
+  },
+  "result": {
+    "id": "airshipvoyage:tail_fin",
+    "count": 1
+  }
+}

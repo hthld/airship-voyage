@@ -72,7 +72,55 @@ public final class GasCell {
 
     /** Полная масса камеры: оболочка + газ, кг. */
     public double totalMassKg() {
-        return massEmptyKg + gasMassKg();
+        return destroyed ? 0 : massEmptyKg + gasMassKg();
+    }
+
+    // ------------------------------------------------------------------ разрушение и пожар (ТЗ 18, AV-030)
+
+    /** Водород горит быстро: доля газа, сгорающая за секунду (полная камера выгорает за ≈ 10 с). */
+    public static final double BURN_PER_SECOND = 0.5;
+
+    private boolean destroyed, burning;
+
+    /** Оболочка разорвана или сгорела: газа нет, оболочка отвалилась, массы и подъёмной силы нет. */
+    public boolean destroyed() { return destroyed; }
+
+    /** Водород горит. */
+    public boolean burning() { return burning; }
+
+    public void destroy() {
+        destroyed = true;
+        burning = false;
+        amountMol = 0;
+        leakPerSecond = 0;
+    }
+
+    /** Поджечь: горит только водород и только если он есть. @return загорелась ли сейчас */
+    public boolean ignite() {
+        if (destroyed || burning || gas != LiftingGas.HYDROGEN || amountMol < 1) return false;
+        burning = true;
+        return true;
+    }
+
+    /** Новая оболочка подвешена на место разрушенной (ремонт): пустая, целая. */
+    public void repair() {
+        destroyed = false;
+        burning = false;
+        amountMol = 0;
+        leakPerSecond = 0;
+    }
+
+    /** Потушить (вода, огнетушитель, дождь). @return горела ли */
+    public boolean extinguish() {
+        boolean was = burning;
+        burning = false;
+        return was;
+    }
+
+    /** Восстановление из сохранения. */
+    public void restoreState(boolean destroyed, boolean burning) {
+        if (destroyed) destroy();
+        else this.burning = burning && gas == LiftingGas.HYDROGEN;
     }
 
     /**
@@ -80,6 +128,7 @@ public final class GasCell {
      * F = ρ(воздуха) · g · V.
      */
     public double buoyancyN(Atmosphere.State air) {
+        if (destroyed) return 0;
         return air.densityKgM3() * G * volume(air);
     }
 
@@ -101,7 +150,7 @@ public final class GasCell {
 
     /** Закачать газ (моль). Излишек сверх вместимости сразу уходит в клапан. @return принято, моль */
     public double fill(double mol, Atmosphere.State air) {
-        if (mol <= 0) return 0;
+        if (mol <= 0 || destroyed) return 0;
         double before = amountMol;
         amountMol += mol;
         ventExcess(air);
@@ -121,7 +170,15 @@ public final class GasCell {
      *         пригодится системе пожаров для водорода.
      */
     public double tick(double dtSeconds, Atmosphere.State air) {
+        if (destroyed) return 0;
         double lost = 0;
+        if (burning) {
+            lost += vent(amountMol * (1 - Math.exp(-BURN_PER_SECOND * dtSeconds)));
+            if (amountMol < 1) {
+                destroy(); // выгорела: оболочка сгорела вместе с газом
+                return lost;
+            }
+        }
         if (leakPerSecond > 0) {
             lost += vent(amountMol * (1 - Math.exp(-leakPerSecond * dtSeconds)));
         }

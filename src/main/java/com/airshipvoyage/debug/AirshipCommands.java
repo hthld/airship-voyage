@@ -268,7 +268,25 @@ public final class AirshipCommands {
             ship.flight().setFill(cellIndex(ship, cellId), f, ship.environment());
         }
         ship.syncCells(true);
-        return ok(c, ship);
+        c.getSource().sendSuccess(() -> gasSummary(ship), false);
+        return 1;
+    }
+
+    /** Понятный итог заправки: наполнение, подъёмная сила против массы и что корабль будет делать. */
+    private static Component gasSummary(AirshipEntity ship) {
+        var env = ship.environment();
+        var bal = ship.flight().balance(env);
+        StringBuilder fills = new StringBuilder();
+        for (int i = 0; i < ship.flight().cells().size(); i++) {
+            fills.append(i == 0 ? "" : " / ").append(String.format(Locale.ROOT, "%.0f %%", ship.flight().fill(i, env) * 100));
+        }
+        double heavy = bal.heavinessKg(), ph = ship.flight().pressureHeightMeters(env);
+        Component state = heavy > 0.5 ? Component.translatable("hud.airshipvoyage.sinking", String.format(Locale.ROOT, "%.0f", heavy))
+                : heavy < -0.5 ? Component.translatable("hud.airshipvoyage.rising", String.format(Locale.ROOT, "%.0f", -heavy),
+                        Double.isNaN(ph) ? "—" : String.format(Locale.ROOT, "%.0f", ph))
+                : Component.translatable("hud.airshipvoyage.balanced");
+        return Component.translatable("commands.airshipvoyage.gas_summary", fills.toString(),
+                String.format(Locale.ROOT, "%.0f", bal.buoyancyKg()), String.format(Locale.ROOT, "%.0f", bal.massKg()), state);
     }
 
     private static int ballast(CommandContext<CommandSourceStack> c, String bag) throws CommandSyntaxException {
@@ -333,11 +351,12 @@ public final class AirshipCommands {
             var entity = level.getEntity(e.id());
             String state;
             if (entity instanceof AirshipEntity s) {
-                state = s.isUnderConstruction() ? "стройка" : !s.heldChunks().isEmpty()
+                state = s.isWreck() ? "обломок" : s.isUnderConstruction() ? "стройка" : !s.heldChunks().isEmpty()
                         ? String.format(Locale.ROOT, "в полёте, держит %d чанк(ов)", s.heldChunks().size())
                         : s.pausedTicks() > 0 ? "пауза: край загруженной области" : "загружен";
             } else {
-                state = String.format(Locale.ROOT, "выгружен, был %d с назад", Math.max(0, now - e.seenGameTime()) / 20);
+                state = String.format(Locale.ROOT, "%sвыгружен, был %d с назад", e.wreck() ? "обломок, " : "",
+                        Math.max(0, now - e.seenGameTime()) / 20);
             }
             text.append(String.format(Locale.ROOT, "%n%s · %s · %.0f %.0f %.0f · %s", e.id().toString().substring(0, 8),
                     e.layout(), e.x(), e.y(), e.z(), state));

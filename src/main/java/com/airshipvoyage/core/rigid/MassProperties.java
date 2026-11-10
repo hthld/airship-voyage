@@ -32,6 +32,12 @@ public record MassProperties(double massKg, Vec3d centerOfMass, Mat3 inertia) {
         }
 
         /** Сосредоточенная масса в точке. */
+        /** Точечная масса со знаком: отрицательная — «изъять» массу, уже учтённую в детали (израсходованное топливо). */
+        public Builder addSignedPoint(Vec3d p, double massKg) {
+            if (massKg == 0) return this;
+            return addInertia(Mat3.ZERO, p, massKg);
+        }
+
         public Builder addPoint(Vec3d p, double massKg) {
             if (massKg <= 0) return this;
             return addInertia(Mat3.ZERO, p, massKg);

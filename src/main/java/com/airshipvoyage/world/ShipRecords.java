@@ -21,7 +21,8 @@ import java.util.UUID;
 public final class ShipRecords extends SavedData {
     public static final String NAME = "airshipvoyage_ships";
 
-    public record Entry(UUID id, String layout, double x, double y, double z, long seenGameTime, boolean underConstruction) {}
+    public record Entry(UUID id, String layout, double x, double y, double z, long seenGameTime, boolean underConstruction,
+                        boolean wreck) {}
 
     private final Map<UUID, Entry> entries = new LinkedHashMap<>();
 
@@ -49,7 +50,7 @@ public final class ShipRecords extends SavedData {
             CompoundTag c = list.getCompound(i);
             if (!c.hasUUID("Id")) continue;
             Entry e = new Entry(c.getUUID("Id"), c.getString("Layout"), c.getDouble("X"), c.getDouble("Y"), c.getDouble("Z"),
-                    c.getLong("Seen"), c.getBoolean("Site"));
+                    c.getLong("Seen"), c.getBoolean("Site"), c.getBoolean("Wreck"));
             r.entries.put(e.id(), e);
         }
         return r;
@@ -67,6 +68,7 @@ public final class ShipRecords extends SavedData {
             c.putDouble("Z", e.z());
             c.putLong("Seen", e.seenGameTime());
             c.putBoolean("Site", e.underConstruction());
+            c.putBoolean("Wreck", e.wreck());
             list.add(c);
         }
         tag.put("Ships", list);

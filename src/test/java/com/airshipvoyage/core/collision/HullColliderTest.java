@@ -5,6 +5,7 @@ import com.airshipvoyage.core.math.OrientedBox;
 import com.airshipvoyage.core.math.Quat;
 import com.airshipvoyage.core.math.Vec3d;
 import com.airshipvoyage.core.structure.PrototypeFrame;
+import com.airshipvoyage.core.structure.PrototypeShip;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -284,6 +285,52 @@ class HullColliderTest {
         var turned = List.of(new HullCollider.Ship(new Vec3d(10, 0, 10), Quat.fromYawPitchRoll(Math.PI / 2, 0, 0), DECK));
         assertTrue(HullCollider.supports(new Vec3d(9.7, -0.6, 13.7), new Vec3d(10.3, 0, 14.3), turned));
         assertFalse(HullCollider.supports(new Vec3d(13.7, -0.6, 9.7), new Vec3d(14.3, 0, 10.3), turned));
+    }
+
+    // ------------------------------------------------------------------ ходьба по кораблю на земле (жалоба владельца)
+
+    /**
+     * Модель хождения игрока по тикам, как в игре: гравитация (vy − 0,08)·0,98, шаг 0,2 за тик по направлению,
+     * сначала «ваниль» — блоки земли, потом корабли через {@link HullCollider#resolve}. Возвращает пройденное
+     * по горизонтали.
+     */
+    private static double walk(HullCollider.Ship ship, double groundTop, Vec3d feet, Vec3d dir, int ticks) {
+        List<OrientedBox> g = List.of(OrientedBox.axisAligned(new Vec3d(0, groundTop - 5, 0), new Vec3d(400, 10, 400)));
+        HullCollider.WorldClipper ground = (min, max, move) -> HullCollider.collideLocal(new Aabb(min, max), move, g).movement();
+        Vec3d start = feet, d = dir.normalized();
+        double vy = 0;
+        boolean onGround = false;
+        for (int t = 0; t < ticks; t++) {
+            vy = (vy - 0.08) * 0.98;
+            Vec3d want = new Vec3d(d.x() * 0.2, vy, d.z() * 0.2);
+            Vec3d min = feet.add(-0.3, 0, -0.3), max = feet.add(0.3, 1.8, 0.3);
+            var r = HullCollider.resolve(min, max, ground.clip(min, max, want), List.of(ship), ground, 0.6, onGround);
+            Vec3d m = r.movement();
+            onGround = want.y() < 0 && m.y() != want.y();
+            if (m.y() != want.y()) vy = 0;
+            feet = feet.add(m);
+        }
+        return Math.hypot(feet.x() - start.x(), feet.z() - start.z());
+    }
+
+    /**
+     * Жалоба владельца после ревью 2: «по дирижаблю ходить нельзя — застреваю». Спущенный корабль лежит на земле
+     * не идеально ровно (доли градуса). Согласование «корабль + блоки» сравнивало итог с началом прохода, а не с
+     * результатом детали: на наклонённом корпусе перевод между осями каждый раз давал новые крошечные отличия,
+     * проходы не сходились, и срабатывал запасной вариант «стоять» — каждый тик, на любой детали.
+     * Корабль: курс 0, дифферент 0,3°, крен −0,2°, низ корпуса на земле y = 64.
+     */
+    @Test
+    void playerWalksOnSlightlyTiltedGroundedShip() {
+        Quat tilt = Quat.fromYawPitchRoll(0, Math.toRadians(0.3), Math.toRadians(-0.2));
+        var ship = new HullCollider.Ship(new Vec3d(0.5, 69.99, 0.5), tilt, PrototypeShip.layout().hullShapes());
+        // по настилу киля вдоль корабля: 40 тиков по 0,2 — 8 м
+        assertEquals(8.0, walk(ship, 64, new Vec3d(-8, 64.8, 0.5), Vec3d.UNIT_X, 40), 0.05, "along the keel");
+        // с земли через нижнюю продольную ферму (0,5 м — шагом) и дальше по земле внутри корпуса к килю:
+        // 20 тиков — 4 м, киль (0,75 м) не задевает
+        assertEquals(4.0, walk(ship, 64, new Vec3d(-4, 64, 9), new Vec3d(0, 0, -1), 20), 0.05, "over the girder");
+        // с земли поперёк кормового кольца (поперечина 0,5 м) — внутрь корпуса
+        assertEquals(10.0, walk(ship, 64, new Vec3d(-13, 64, 3.5), Vec3d.UNIT_X, 50), 0.05, "over the ring crossbar");
     }
 
     @Test

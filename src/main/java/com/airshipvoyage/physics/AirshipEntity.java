@@ -67,6 +67,11 @@ public class AirshipEntity extends Entity {
     /** Стройка: {"active": bool, "installed": [точки плана]}; пусто — корабль летает. */
     private static final EntityDataAccessor<CompoundTag> DATA_CONSTRUCTION =
             SynchedEntityData.defineId(AirshipEntity.class, EntityDataSerializers.COMPOUND_TAG);
+    /** Доли мощности моторов для вращения винтов: {"t": [..]} по порядку {@code layout().engines()}. */
+    private static final EntityDataAccessor<CompoundTag> DATA_ENGINES =
+            SynchedEntityData.defineId(AirshipEntity.class, EntityDataSerializers.COMPOUND_TAG);
+    /** Обороты винта на экране при полном ходу, рад/тик (≈ 3 об/с — быстрее глаз видит строб). */
+    private static final float PROP_RAD_PER_TICK_FULL = (float) (Math.PI * 6 / 20);
 
     private static final double DT = 1.0 / 20.0;
     /** Предел скорости для отладочных команд, м/с (≈ 135 км/ч — максимум LZ 129). */
@@ -110,6 +115,7 @@ public class AirshipEntity extends Entity {
         builder.define(DATA_ORIENTATION, new Quaternionf());
         builder.define(DATA_CELLS, new CompoundTag());
         builder.define(DATA_CONSTRUCTION, new CompoundTag());
+        builder.define(DATA_ENGINES, new CompoundTag());
     }
 
     // ------------------------------------------------------------------ стройка (ТЗ, 4–5)
@@ -193,6 +199,7 @@ public class AirshipEntity extends Entity {
         if (!level().isClientSide) {
             entityData.set(DATA_LAYOUT, newLayout.id());
             syncCells(true);
+            syncEngines(true);
         }
         reapplyPosition();
     }
@@ -211,6 +218,39 @@ public class AirshipEntity extends Entity {
 
     /** Наполнение камер для рендера (клиент) — 0..1 по порядку {@code layout().cells()}. */
     public float[] cellFillForRender() { return cellFill; }
+
+    // --- моторы: на сервере — последние отправленные доли мощности, на клиенте — полученные и углы винтов ---
+    private float[] engineThrottle = new float[0];
+    private float[] propAngle = new float[0], propAngleO = new float[0];
+
+    /** Угол винта мотора {@code index} (по {@code layout().engines()}) для рендера с учётом доли тика. */
+    public float propAngle(int index, float partialTick) {
+        if (index >= propAngle.length) return 0;
+        return propAngleO[index] + (propAngle[index] - propAngleO[index]) * partialTick;
+    }
+
+    /** Отправить клиентам доли мощности моторов, если заметно изменились (для винтов). */
+    private void syncEngines(boolean force) {
+        if (level().isClientSide) return;
+        var engines = flight.engines();
+        if (engineThrottle.length != engines.size()) {
+            engineThrottle = new float[engines.size()];
+            force = true;
+        }
+        boolean changed = force;
+        for (int i = 0; i < engines.size(); i++) {
+            if (Math.abs(engines.get(i).throttle() - engineThrottle[i]) > 0.01) changed = true;
+        }
+        if (!changed) return;
+        ListTag list = new ListTag();
+        for (int i = 0; i < engines.size(); i++) {
+            engineThrottle[i] = (float) engines.get(i).throttle();
+            list.add(net.minecraft.nbt.FloatTag.valueOf(engineThrottle[i]));
+        }
+        CompoundTag tag = new CompoundTag();
+        tag.put("t", list);
+        entityData.set(DATA_ENGINES, tag);
+    }
     public boolean[] cellLeakingForRender() { return cellLeaking; }
 
     /**
@@ -308,6 +348,10 @@ public class AirshipEntity extends Entity {
             });
         } else if (DATA_CONSTRUCTION.equals(key)) {
             applyConstructionTag();
+        } else if (DATA_ENGINES.equals(key)) {
+            ListTag t = entityData.get(DATA_ENGINES).getList("t", Tag.TAG_FLOAT);
+            engineThrottle = new float[t.size()];
+            for (int i = 0; i < t.size(); i++) engineThrottle[i] = t.getFloat(i);
         } else if (DATA_CELLS.equals(key)) {
             CompoundTag tag = entityData.get(DATA_CELLS);
             ListTag fills = tag.getList("fill", Tag.TAG_FLOAT), leaks = tag.getList("leak", Tag.TAG_BYTE);
@@ -401,6 +445,7 @@ public class AirshipEntity extends Entity {
         applyVanillaAngles(body.orientation());
         syncOrientation();
         if (tickCount % 5 == 0) syncCells(false);
+        syncEngines(false);
         carryStandingEntities(entityPos, oldRot, p, body.orientation());
     }
 
@@ -408,6 +453,14 @@ public class AirshipEntity extends Entity {
         Vec3d oldPos = new Vec3d(getX(), getY(), getZ());
         Quat oldRot = orientation;
         orientationO = orientation;
+        if (propAngle.length != engineThrottle.length) {
+            propAngle = new float[engineThrottle.length];
+            propAngleO = new float[engineThrottle.length];
+        }
+        for (int i = 0; i < propAngle.length; i++) {
+            propAngleO[i] = propAngle[i];
+            propAngle[i] += engineThrottle[i] * PROP_RAD_PER_TICK_FULL;
+        }
         if (orientationLerpSteps > 0) {
             orientation = orientation.slerp(orientationTarget, 1.0 / orientationLerpSteps);
             orientationLerpSteps--;
@@ -570,6 +623,7 @@ public class AirshipEntity extends Entity {
             applyVanillaAngles(body.orientation());
             syncOrientation();
             syncCells(true);
+            syncEngines(true);
         }
     }
 
@@ -602,6 +656,19 @@ public class AirshipEntity extends Entity {
                     flight.dropBallast(bag.id, Math.max(0, bag.massKg() - b.getDouble("Kg")));
                 }
             }
+        }
+        // моторы (ТЗ 8.4): команда телеграфа и фактические обороты
+        ListTag engines = tag.getList("Engines", Tag.TAG_COMPOUND);
+        for (int i = 0; i < engines.size(); i++) {
+            CompoundTag c = engines.getCompound(i);
+            var e = flight.engine(c.getString("Id"));
+            if (e == null) continue;
+            com.airshipvoyage.core.propulsion.Telegraph.byKey(c.getString("Telegraph")).ifPresent(e::setTelegraph);
+            e.setThrottle(c.getDouble("Throttle"));
+        }
+        ListTag rudders = tag.getList("Rudders", Tag.TAG_DOUBLE);
+        if (rudders.size() == 4) {
+            flight.restoreRudders(rudders.getDouble(0), rudders.getDouble(1), rudders.getDouble(2), rudders.getDouble(3));
         }
         flight.massChanged();
     }
@@ -642,6 +709,18 @@ public class AirshipEntity extends Entity {
             ballast.add(c);
         }
         tag.put("Ballast", ballast);
+        ListTag engines = new ListTag();
+        for (var e : flight.engines()) {
+            CompoundTag c = new CompoundTag();
+            c.putString("Id", e.id());
+            c.putString("Telegraph", e.telegraph().key());
+            c.putDouble("Throttle", e.throttle());
+            engines.add(c);
+        }
+        tag.put("Engines", engines);
+        // рули (ТЗ 8.5): команды и фактические отклонения
+        tag.put("Rudders", doubles(flight.rudderCommandDeg(), flight.rudderDeg(),
+                flight.elevatorCommandDeg(), flight.elevatorDeg()));
         Quat q = body.orientation();
         tag.put("Orientation", doubles(q.w(), q.x(), q.y(), q.z()));
         Vec3d v = body.velocity(), w = body.angularVelocity();

@@ -33,7 +33,7 @@ class SiteCheckTest {
     }
 
     /**
-     * Габарит прототипа: x ±10,25, y ±6, z ±6. Щелчок по блоку (100, 64, 200), нос на восток:
+     * Габарит прототипа: x ±10,25, y от −6 до 8 (верхний стабилизатор), z ±9 (горизонтальные стабилизаторы). Щелчок по блоку (100, 64, 200), нос на восток:
      * центр над центром блока (100,5; 200,5), низ на верхней грани блока y = 65 → начало координат на y = 71.
      */
     @Test
@@ -45,9 +45,9 @@ class SiteCheckTest {
         assertEquals(90.25, p.bounds().min().x(), 1e-9);
         assertEquals(110.75, p.bounds().max().x(), 1e-9);
         assertEquals(65.0, p.bounds().min().y(), 1e-9);
-        assertEquals(77.0, p.bounds().max().y(), 1e-9);
-        assertEquals(194.5, p.bounds().min().z(), 1e-9);
-        assertEquals(206.5, p.bounds().max().z(), 1e-9);
+        assertEquals(79.0, p.bounds().max().y(), 1e-9);
+        assertEquals(191.5, p.bounds().min().z(), 1e-9);
+        assertEquals(209.5, p.bounds().max().z(), 1e-9);
     }
 
     /** Кольца на x = 90,5 ± 0,25, 100,5 ± 0,25, 110,5 ± 0,25 → столбцы 90, 100, 110; по z — блоки 194…206 (13). */
@@ -84,8 +84,8 @@ class SiteCheckTest {
         // x = 89 — блок [89, 90], габарит начинается с 90,25: снаружи
         FlatWorld w = new FlatWorld();
         w.blocks.add(FlatWorld.key(89, 65, 200));
-        // y = 77 — блок над верхом габарита (верх ровно на 77)
-        w.blocks.add(FlatWorld.key(100, 77, 200));
+        // y = 79 — блок над верхом габарита (верх ровно на 79, верхний стабилизатор)
+        w.blocks.add(FlatWorld.key(100, 79, 200));
         assertTrue(SiteCheck.check(PLAN, place, w).ok());
         // x = 90 — блок [90, 91] задевает габарит
         w.blocks.add(FlatWorld.key(90, 65, 200));
@@ -93,9 +93,9 @@ class SiteCheckTest {
         assertEquals(Problem.OBSTRUCTED, r.problem());
         assertEquals(90, r.x());
         assertEquals(65, r.y());
-        // самый верхний слой внутри — y = 76
+        // самый верхний слой внутри — y = 78
         FlatWorld w2 = new FlatWorld();
-        w2.blocks.add(FlatWorld.key(100, 76, 200));
+        w2.blocks.add(FlatWorld.key(100, 78, 200));
         assertEquals(Problem.OBSTRUCTED, SiteCheck.check(PLAN, place, w2).problem());
     }
 
@@ -103,8 +103,8 @@ class SiteCheckTest {
     @Test
     void quarterTurnRotatesFootprint() {
         var p = SiteCheck.place(PLAN.layout(), 100, 64, 200, 1);
-        assertEquals(94.5, p.bounds().min().x(), 1e-9);
-        assertEquals(106.5, p.bounds().max().x(), 1e-9);
+        assertEquals(91.5, p.bounds().min().x(), 1e-9);
+        assertEquals(109.5, p.bounds().max().x(), 1e-9);
         assertEquals(190.25, p.bounds().min().z(), 1e-9);
         assertEquals(210.75, p.bounds().max().z(), 1e-9);
         assertTrue(p.rotation().forward().z() < -0.999);
@@ -119,7 +119,7 @@ class SiteCheckTest {
     @Test
     void worldLimitsAndOtherProjects() {
         FlatWorld w = new FlatWorld();
-        w.maxY = 70; // верх габарита — блок 76
+        w.maxY = 70; // верх габарита — блок 78
         assertEquals(Problem.OUT_OF_WORLD, SiteCheck.check(PLAN, SiteCheck.place(PLAN.layout(), 100, 64, 200, 0), w).problem());
         FlatWorld w2 = new FlatWorld();
         w2.other = true;

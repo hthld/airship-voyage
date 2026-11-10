@@ -79,9 +79,30 @@ public class AirshipRenderer extends EntityRenderer<AirshipEntity> {
             }
         }
         drawCells(ship, last, buffers, packedLight);
+        drawPropellers(ship, partialTick, last, buffers, packedLight);
         if (ship.isUnderConstruction()) drawGhosts(ship, partialTick, last, buffers, packedLight);
         pose.popPose();
         super.render(ship, entityYaw, partialTick, pose, buffers, packedLight);
+    }
+
+    /**
+     * Винты моторов (ТЗ 8.4): две деревянные лопасти 1,7 м на оси тяги, вращаются по доле мощности, которую
+     * присылает сервер. Только визуально — у винта нет коллизии. У стройки — только у установленных гондол.
+     */
+    private void drawPropellers(AirshipEntity ship, float partialTick, PoseStack.Pose pose, MultiBufferSource buffers, int light) {
+        var engines = ship.layout().engines();
+        if (engines.isEmpty()) return;
+        VertexConsumer vc = buffers.getBuffer(RenderType.entityCutout(materialTexture("walkway")));
+        for (int i = 0; i < engines.size(); i++) {
+            var mount = engines.get(i);
+            if (ship.isUnderConstruction() && !ship.construction().isInstalled(mount.slot())) continue;
+            Vec3d hub = mount.thrustPoint().add(mount.axis().scale(0.06));
+            double angle = ship.propAngle(i, partialTick);
+            for (int blade = 0; blade < 2; blade++) {
+                Quat spin = Quat.fromAxisAngle(mount.axis(), angle + blade * Math.PI / 2);
+                drawBox(pose, vc, new OrientedBox(hub, new Vec3d(0.04, 0.85, 0.08), spin), light, 0xFFFFFFFF);
+            }
+        }
     }
 
     private ResourceLocation materialTexture(String material) {

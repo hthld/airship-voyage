@@ -31,6 +31,23 @@ class HullDragTest {
         assertEquals(4 * dv5, 10 - b2.velocity().x(), 1e-9);
     }
 
+    /**
+     * Поперечная сила корпуса на ходу: скорость (5; 0; 1) — к квадратичному сопротивлению бортом
+     * ½·1,225·(1·20·4)·1² = 49 Н добавляется ½·1,225·(0,5·80)·5·1 = 122,5 Н; на месте (u = 0) — только 49 Н.
+     */
+    @Test
+    void crossflowLiftAppearsOnlyUnderWay() {
+        RigidBody moving = body(), still = body();
+        moving.setVelocity(new Vec3d(5, 0, 1));
+        still.setVelocity(new Vec3d(0, 0, 1));
+        drag.apply(moving, Vec3d.ZERO, 1.225);
+        drag.apply(still, Vec3d.ZERO, 1.225);
+        moving.step(1.0);
+        still.step(1.0);
+        assertEquals((49 + 122.5) / 2000, 1 - moving.velocity().z(), 1e-9);
+        assertEquals(49.0 / 2000, 1 - still.velocity().z(), 1e-9);
+    }
+
     @Test
     void broadsideDragIsLargerThanHeadOn() {
         // одна и та же скорость, но бортом (20×4) против носом (4×4)

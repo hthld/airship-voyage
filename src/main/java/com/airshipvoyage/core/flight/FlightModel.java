@@ -7,10 +7,14 @@ import com.airshipvoyage.core.math.Vec3d;
 import com.airshipvoyage.core.physics.Atmosphere;
 import com.airshipvoyage.core.physics.GasCell;
 import com.airshipvoyage.core.physics.LiftingGas;
+import com.airshipvoyage.core.propulsion.Engine;
+import com.airshipvoyage.core.propulsion.Telegraph;
 import com.airshipvoyage.core.rigid.HullDrag;
 import com.airshipvoyage.core.rigid.MassProperties;
 import com.airshipvoyage.core.rigid.RigidBody;
 import com.airshipvoyage.core.structure.CellSlot;
+import com.airshipvoyage.core.structure.ControlSurface;
+import com.airshipvoyage.core.structure.EngineMount;
 import com.airshipvoyage.core.structure.ShipLayout;
 
 import java.util.ArrayList;
@@ -125,6 +129,9 @@ public final class FlightModel {
     private final ShipLayout layout;
     private final List<GasCell> cells = new ArrayList<>();
     private final List<Ballast> ballast = new ArrayList<>();
+    private final List<Engine> engines = new ArrayList<>();
+    /** Рули (ТЗ 8.5): команда и фактическое отклонение, градусы. Положительные — влево и нос вверх. */
+    private double rudderCmdDeg, elevatorCmdDeg, rudderDeg, elevatorDeg;
     private final RigidBody body;
     private final HullDrag drag;
     /** Отладка: вес и архимедова сила не действуют (корабль «идеально уравновешен»). */
@@ -138,6 +145,7 @@ public final class FlightModel {
             Vec3d c = s.bay().center();
             cells.add(new GasCell(s.id(), s.capacityM3(), s.envelopeMassKg(), c.x(), c.y(), c.z(), gas));
         }
+        for (EngineMount m : layout.engines()) engines.add(new Engine(m));
         this.body = new RigidBody(buildMass());
         this.massAtLastBuild = body.massKg();
 
@@ -147,7 +155,8 @@ public final class FlightModel {
         double airMass = 1.225 * displaced;
         body.setAddedMassLocal(new Vec3d(k.x() * airMass, k.y() * airMass, k.z() * airMass));
 
-        Vec3d size = layout.localBoundsMax().sub(layout.localBoundsMin());
+        // габарит без оперения: стабилизаторы — несущие плоскости, их сила считается отдельно (applySurfaces)
+        Vec3d size = layout.aeroSize();
         // голый каркас почти весь продувается; мешки внутри перекрывают его
         drag = HullDrag.estimateFromSize(size, 1.2, layout.cells().isEmpty() ? 0.85 : 0.2);
     }
@@ -187,6 +196,9 @@ public final class FlightModel {
             cells.get(i).tick(dt, airAtLocal(layout.cells().get(i).bay().center(), env));
         }
         refreshMass(false);
+        for (Engine e : engines) e.tick(dt);
+        rudderDeg = servo(rudderDeg, rudderCmdDeg, dt);
+        elevatorDeg = servo(elevatorDeg, elevatorCmdDeg, dt);
 
         Vec3d[] box = layout.worldAabb(body.position(), body.orientation());
         Aabb bounds = new Aabb(box[0], box[1]).inflate(0.5, 0.5, 0.5);
@@ -229,6 +241,109 @@ public final class FlightModel {
         Vec3d pos = body.position();
         double rho = env.atmosphere().at(env.altitudeMeters(pos.y())).densityKgM3();
         drag.apply(body, env.wind(pos), rho);
+        applyThrust(env, rho);
+        applySurfaces(env, rho);
+    }
+
+    // ------------------------------------------------------------------ оперение и рули (ТЗ 8.5)
+
+    /** Наклон кривой подъёмной силы стабилизатора малого удлинения (λ ≈ 1,5–2), 1/рад. */
+    public static final double FIN_LIFT_SLOPE = 2.3;
+    /** Доля руля в площади стабилизатора: отклонение руля на δ меняет угол обтекания всей плоскости на τ·δ. */
+    public static final double RUDDER_EFFECTIVENESS = 0.5;
+    /** Предельное отклонение рулей, градусы. */
+    public static final double MAX_DEFLECTION_DEG = 25;
+    /** Скорость перекладки рулей (штурвальный привод), градусов в секунду. */
+    public static final double SERVO_DEG_PER_S = 15;
+    /** Срыв потока: дальше этого угла сила не растёт, рад (≈ 20°). */
+    public static final double STALL_RAD = 0.35;
+
+    private static double servo(double actual, double command, double dt) {
+        double step = SERVO_DEG_PER_S * dt, d = command - actual;
+        return Math.abs(d) <= step ? command : actual + Math.signum(d) * step;
+    }
+
+    /**
+     * Сила на каждом стабилизаторе: F = ½·ρ·V²·S·a·(τ·δ − α) вдоль его нормали, где V и α — скорость и угол
+     * набегающего потока в центре давления (с учётом вращения корпуса), δ — отклонение руля. Без воздушной скорости
+     * руль ничего не делает (ТЗ 8.5); на заднем ходу руль не работает (поток с задней кромки), стабилизатор — работает.
+     */
+    private void applySurfaces(Environment env, double rho) {
+        for (ControlSurface s : layout.controlSurfaces()) {
+            Vec3d at = body.localToWorld(s.center());
+            Vec3d local = body.orientation().inverseRotate(body.velocityAt(at).sub(env.wind(at)));
+            double u = local.x(), w = local.dot(s.normal());
+            double v2 = u * u + w * w;
+            if (v2 < 1e-8) continue;
+            double alpha = Math.atan2(w, Math.abs(u));
+            double deflection = Math.toRadians(s.kind() == ControlSurface.Kind.RUDDER ? rudderDeg : elevatorDeg);
+            double angle = (u > 0 ? RUDDER_EFFECTIVENESS * deflection : 0) - alpha;
+            angle = Math.max(-STALL_RAD, Math.min(STALL_RAD, angle));
+            double force = 0.5 * rho * v2 * s.areaM2() * FIN_LIFT_SLOPE * angle;
+            body.applyForceAt(body.orientation().rotate(s.normal()).scale(force), at);
+        }
+    }
+
+    /** Команда рулю направления, градусы (&gt; 0 — влево), ограничена ±{@value #MAX_DEFLECTION_DEG}. */
+    public void setRudder(double deg) { rudderCmdDeg = clampDeflection(deg); }
+    /** Команда рулю высоты, градусы (&gt; 0 — нос вверх). */
+    public void setElevator(double deg) { elevatorCmdDeg = clampDeflection(deg); }
+    public double rudderCommandDeg() { return rudderCmdDeg; }
+    public double elevatorCommandDeg() { return elevatorCmdDeg; }
+    public double rudderDeg() { return rudderDeg; }
+    public double elevatorDeg() { return elevatorDeg; }
+
+    /** Восстановление из сохранения: команды и фактические отклонения. */
+    public void restoreRudders(double rudderCmd, double rudder, double elevatorCmd, double elevator) {
+        rudderCmdDeg = clampDeflection(rudderCmd);
+        rudderDeg = clampDeflection(rudder);
+        elevatorCmdDeg = clampDeflection(elevatorCmd);
+        elevatorDeg = clampDeflection(elevator);
+    }
+
+    private static double clampDeflection(double deg) {
+        return Math.max(-MAX_DEFLECTION_DEG, Math.min(MAX_DEFLECTION_DEG, deg));
+    }
+
+    /**
+     * Тяга моторов (ТЗ 8.4): вдоль оси винта в точке крепления, по скорости набегающего потока в этой точке.
+     * Не зависит от режима «нейтрально». Тяга винта и мощность мотора без наддува падают с плотностью воздуха —
+     * обе в отношении ρ/ρ₀.
+     */
+    private void applyThrust(Environment env, double rho) {
+        double sigma = rho / 1.225;
+        for (Engine e : engines) {
+            if (e.throttle() == 0) continue;
+            Vec3d at = body.localToWorld(e.mount().thrustPoint());
+            Vec3d dir = body.orientation().rotate(e.mount().axis());
+            double axial = body.velocityAt(at).sub(env.wind(at)).dot(dir);
+            body.applyForceAt(dir.scale(e.thrustN(axial) * sigma), at);
+        }
+    }
+
+    // ------------------------------------------------------------------ моторы (ТЗ 8.4, 9.2)
+
+    public List<Engine> engines() { return Collections.unmodifiableList(engines); }
+
+    /** Мотор по ID детали-гондолы; null — нет такого. */
+    public Engine engine(String id) {
+        for (Engine e : engines) if (e.id().equals(id)) return e;
+        return null;
+    }
+
+    /**
+     * Команда телеграфа одному мотору или всем ({@code "all"}) — как с мостика (ТЗ 9.2).
+     * @return сколько моторов получили команду
+     */
+    public int setTelegraph(String id, Telegraph t) {
+        int n = 0;
+        for (Engine e : engines) {
+            if ("all".equals(id) || e.id().equals(id)) {
+                e.setTelegraph(t);
+                n++;
+            }
+        }
+        return n;
     }
 
     /** Центр газа: в неполном мешке газ занимает верхнюю часть отсека. */

@@ -23,6 +23,8 @@ public final class ModCreativeTabs {
                         output.accept(ModItems.KEEL_SECTION.get());
                         output.accept(ModItems.TRUSS_SECTION.get());
                         output.accept(ModItems.FOLDED_GAS_CELL.get());
+                        output.accept(ModItems.ENGINE_POD.get());
+                        output.accept(ModItems.TAIL_FIN.get());
                     })
                     .build());
 

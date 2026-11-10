@@ -52,11 +52,19 @@ class FlightModelTest {
         FlightModel m = ship(0);
         var env = env(null);
         double f = m.weighOff(env);
-        // сухая масса ≈ 1400 кг, уравновешивание при ≈ 78 % — см. описание PrototypeShip
-        assertTrue(f > 0.7 && f < 0.85, "weigh-off fill " + f);
+        // сухая масса: каркас 976 + гондолы 2 × 70 + оперение 48 + оболочки 221,05 + балласт 200 = 1585,05 кг;
+        // чистая подъёмная сила водорода у моря 1,225 − 0,0853 = 1,1397 кг/м³, объём камер 1582,1 м³ →
+        // уравновешивание при 1585,05 / (1,1397 · 1582,1) = 0,879 — см. описание PrototypeShip
+        assertEquals(0.879, f, 0.002, "weigh-off fill");
         var b = m.balance(env);
         assertEquals(0, b.heavinessKg(), 0.01);
-        assertTrue(b.massKg() > 1350 && b.massKg() < 1550, "mass " + b.massKg());
+        // плюс водород: 0,879 · 1582,1 м³ · 0,0853 кг/м³ ≈ 119 кг
+        assertEquals(1704, b.massKg(), 3, "mass");
+        // балансировочный балласт держит ЦМ над серединой: оперение 48 кг на x = −8,5 (момент −408) уравновешено
+        // мешками 125,5 кг на носу и 74,5 кг на корме (8 · 51 = 408)
+        assertEquals(125.5, m.ballast().get(0).massKg(), 1e-6);
+        assertEquals(74.5, m.ballast().get(1).massKg(), 1e-6);
+        assertEquals(0, b.centreOfMassLocal().x(), 1e-6);
     }
 
     @Test
@@ -118,8 +126,9 @@ class FlightModelTest {
         }
         // наполнение 95 % → высота давления ≈ 430 м: дальше автоклапаны стравливают газ
         assertTrue(m.cells().get(0).amountMol() < mol0 * 0.95, "no venting");
-        // равновесие там, где плотность воздуха упала до доли уравновешивания (≈ 0,78) — около 2,4 км
-        assertTrue(peak > 1800 && peak < 3000, "peak altitude " + peak);
+        // равновесие там, где плотность воздуха упала до доли уравновешивания (0,879): по ISA
+        // (1 − 0,0065·h/288,15)^4,256 = 0,879 → h ≈ 1,32 км; корабль подходит к ней с небольшим проскоком
+        assertTrue(peak > 1250 && peak < 1600, "peak altitude " + peak);
     }
 
     @Test
@@ -268,6 +277,153 @@ class FlightModelTest {
         assertTrue(m.lastReport().grounded(), "not resting on the rail");
         assertTrue(keelBottom > 64.9 && keelBottom < 65.0, "keel bottom " + keelBottom);
         assertTrue(Math.abs(m.body().velocity().y()) < 0.05, "vy " + m.body().velocity().y());
+    }
+
+    // ------------------------------------------------------------------ моторы (AV-011, ТЗ 8.4)
+
+    /** Уравновешенный прототип у уровня моря, без земли. */
+    private static FlightModel trimmedShip() {
+        FlightModel m = ship(0);
+        m.weighOff(env(null));
+        return m;
+    }
+
+    /**
+     * Полный ход обоими моторами: тяга 2 × 1500 Н (до 8,4 м/с винт упирается в статическую тягу) против
+     * сопротивления ½·ρ·Cd·S·v², где Cd·S = 1,2 · 12 · 14 · (1 − 0,2) = 161,28 м² (габарит с гондолами, мешки
+     * перекрывают 80 % решётки): 3000 = 98,784·v² → v = 5,511 м/с ≈ 20 км/ч.
+     */
+    @Test
+    void fullAheadReachesSpeedWhereThrustEqualsDrag() {
+        FlightModel m = trimmedShip();
+        assertEquals(2, m.setTelegraph("all", com.airshipvoyage.core.propulsion.Telegraph.FULL));
+        var env = env(null);
+        run(m, env, 60);
+        double v = m.body().velocity().x();
+        assertEquals(Math.sqrt(3000 / (0.5 * 1.225 * 161.28)), v, 0.03, "steady speed");
+        assertEquals(0, m.body().velocity().z(), 1e-6);
+        // ось винтов (y = −1,00) почти на высоте ЦМ (−1,08 при этом наполнении): момент 3000 Н · 0,08 м даёт
+        // дифферент на нос 0,1–0,5° и медленное снижение ≈ 2,4 см/с — держать высоту на ходу будут рули (AV-012)
+        assertEquals(0, Math.toDegrees(m.body().orientation().pitchRad()), 1.0);
+        assertEquals(0, m.body().velocity().y(), 0.05, "vertical speed");
+    }
+
+    /** Задний ход: тяга вдвое меньше — 2 × 750 Н = 98,784·v² → v = 3,897 м/с назад. */
+    @Test
+    void fullAsternMovesBackwardsSlower() {
+        FlightModel m = trimmedShip();
+        m.setTelegraph("all", com.airshipvoyage.core.propulsion.Telegraph.FULL_ASTERN);
+        run(m, env(null), 60);
+        assertEquals(-Math.sqrt(1500 / (0.5 * 1.225 * 161.28)), m.body().velocity().x(), 0.03);
+    }
+
+    /** Мотор не меняет обороты мгновенно: через 1 с после «полный» доля мощности 0,25 — корабль едва тронулся. */
+    @Test
+    void shipKeepsInertiaAfterTelegraphChange() {
+        FlightModel m = trimmedShip();
+        m.setTelegraph("all", com.airshipvoyage.core.propulsion.Telegraph.FULL);
+        run(m, env(null), 1);
+        assertEquals(0.25, m.engine("engine_port").throttle(), 1e-9);
+        assertTrue(m.body().velocity().x() > 0 && m.body().velocity().x() < 0.3, "v " + m.body().velocity().x());
+    }
+
+    /**
+     * Работает только правый мотор: тяга на плече 6,5 м от диаметральной плоскости разворачивает нос влево
+     * (к северу, курс растёт) — ТЗ 8.4, отказ одного мотора меняет поведение. Рули нейтрально; корабль крутится,
+     * пока момент 1500 · 6,5 = 9750 Н·м не уравновесит демпфирование решётки k·ω² (k ≈ 38 945 Н·м·с²) и
+     * верхнего стабилизатора: хвост на плече 8,5 м идёт вбок со скоростью ω·8,5 ≈ 4 м/с, поток срывается,
+     * C_N = 2,3·0,35 ≈ 0,8, сила ≈ ½·1,225·17·6·0,8 ≈ 50 Н, момент ≈ 440 Н·м → ω ≈ √(9310 / 38 945) ≈ 0,49 рад/с.
+     * Руль с одним мотором не справится: его момент на полном ходу ≈ 470 Н·м — в 20 раз меньше.
+     */
+    @Test
+    void starboardEngineAloneTurnsShipToPort() {
+        FlightModel m = trimmedShip();
+        assertEquals(1, m.setTelegraph("engine_stbd", com.airshipvoyage.core.propulsion.Telegraph.FULL));
+        run(m, env(null), 5);
+        double yaw = Math.toDegrees(m.body().orientation().yawRad());
+        assertTrue(yaw > 5 && yaw < 90, "yaw after 5 s " + yaw);
+        run(m, env(null), 40);
+        assertEquals(0.48, m.body().angularVelocity().y(), 0.02, "steady yaw rate");
+    }
+
+    // ------------------------------------------------------------------ рули (AV-012, ТЗ 8.5)
+
+    /** Привод рулей: 15°/с, ограничение ±25°. Через 1 с после команды «25°» руль на 15°, через 2 с — на 25°. */
+    @Test
+    void ruddersMoveAtServoRate() {
+        FlightModel m = trimmedShip();
+        m.setRudder(40);
+        assertEquals(25, m.rudderCommandDeg(), 0);
+        run(m, env(null), 1);
+        assertEquals(15, m.rudderDeg(), 1e-9);
+        run(m, env(null), 1);
+        assertEquals(25, m.rudderDeg(), 1e-9);
+    }
+
+    /** ТЗ 8.5: без воздушной скорости рули не действуют — корабль на месте не поворачивает и не меняет дифферент. */
+    @Test
+    void ruddersDoNothingWithoutAirspeed() {
+        FlightModel m = trimmedShip();
+        m.setRudder(25);
+        m.setElevator(25);
+        run(m, env(null), 10);
+        assertEquals(0, Math.toDegrees(m.body().orientation().yawRad()), 1e-6);
+        assertEquals(0, Math.toDegrees(m.body().orientation().pitchRad()), 1e-6);
+    }
+
+    /**
+     * Полный ход и полный левый руль: корабль поворачивает влево. Установившийся вираж — решение двух уравнений
+     * (отдельным расчётом, не кодом модели): боковые силы дают центростремительную m_бок·V·ω (m_бок = 1704 + 1744 кг
+     * присоединённой массы), момент руля на плече 8,5 м — демпфирование решётки 38 945·ω². Сила руля
+     * ½·ρ·V²·6·2,3·(τ·δ − α_хвоста), α_хвоста = atan((v_бок + 8,5·ω)/V); сила корпуса — квадратичное сопротивление
+     * бортом (C·S = 236 м²) плюс поперечная сила 98,4·|u|·v_бок. При V = 5,6 м/с: ω = 0,0241 рад/с, скольжение 9,9°.
+     * Без поперечной силы корпуса было бы 0,008 — найдено этим тестом.
+     */
+    @Test
+    void rudderTurnsShipUnderWay() {
+        FlightModel m = trimmedShip();
+        m.setTelegraph("all", com.airshipvoyage.core.propulsion.Telegraph.FULL);
+        run(m, env(null), 30);
+        assertEquals(0, m.body().angularVelocity().y(), 1e-6, "straight before the rudder");
+        m.setRudder(25);
+        run(m, env(null), 40);
+        double w = m.body().angularVelocity().y();
+        assertEquals(0.0241, w, 0.002, "steady turn rate");
+        assertTrue(Math.toDegrees(m.body().orientation().yawRad()) > 30, "turned to port");
+        // руль вправо — в другую сторону
+        FlightModel r = trimmedShip();
+        r.setTelegraph("all", com.airshipvoyage.core.propulsion.Telegraph.FULL);
+        run(r, env(null), 30);
+        r.setRudder(-25);
+        run(r, env(null), 40);
+        assertEquals(-w, r.body().angularVelocity().y(), 1e-3);
+    }
+
+    /**
+     * Флюгерная устойчивость: на ходу толчок по курсу (0,1 рад/с) затухает — стабилизатор на хвосте давит
+     * против бокового скольжения. Раньше (без оперения) вращение гасло только квадратичным демпфированием решётки.
+     */
+    @Test
+    void finsDampYawDisturbanceUnderWay() {
+        FlightModel m = trimmedShip();
+        m.setTelegraph("all", com.airshipvoyage.core.propulsion.Telegraph.FULL);
+        run(m, env(null), 30);
+        m.body().setAngularVelocity(new Vec3d(0, 0.1, 0));
+        run(m, env(null), 40);
+        // флюгер возвращает с забросом (на 20-й секунде −0,008 рад/с), к 40-й колебание затухло
+        assertEquals(0, m.body().angularVelocity().y(), 0.003, "yaw rate after 40 s");
+    }
+
+    /** Руль высоты на ходу задирает нос: +15° на полном ходу — дифферент на корму больше 0,5°; на месте — ничего. */
+    @Test
+    void elevatorPitchesNoseUpUnderWay() {
+        FlightModel m = trimmedShip();
+        m.setTelegraph("all", com.airshipvoyage.core.propulsion.Telegraph.FULL);
+        run(m, env(null), 30);
+        m.setElevator(15);
+        run(m, env(null), 30);
+        assertTrue(Math.toDegrees(m.body().orientation().pitchRad()) > 0.5,
+                "pitch " + Math.toDegrees(m.body().orientation().pitchRad()));
     }
 
     @Test

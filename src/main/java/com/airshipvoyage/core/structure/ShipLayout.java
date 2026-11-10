@@ -20,6 +20,10 @@ public final class ShipLayout {
     private final List<PartInstance> parts;
     private final List<OrientedBox> hullShapes;
     private final List<CellSlot> cells;
+    private final List<EngineMount> engines;
+    private final List<ControlSurface> controlSurfaces;
+    /** Габарит без оперения — для оценки сопротивления корпуса (оперение считается отдельно, как несущие плоскости). */
+    private final Vec3d aeroMin, aeroMax;
     private final List<Vec3d> contactSamples;
     private final Vec3d boundsMin, boundsMax;
 
@@ -28,10 +32,31 @@ public final class ShipLayout {
     }
 
     public ShipLayout(String id, List<PartInstance> parts, List<CellSlot> cells) {
+        this(id, parts, cells, List.of());
+    }
+
+    public ShipLayout(String id, List<PartInstance> parts, List<CellSlot> cells, List<EngineMount> engines) {
+        this(id, parts, cells, engines, List.of());
+    }
+
+    public ShipLayout(String id, List<PartInstance> parts, List<CellSlot> cells, List<EngineMount> engines,
+                      List<ControlSurface> controlSurfaces) {
         if (parts.isEmpty()) throw new IllegalArgumentException("layout " + id + " is empty");
         this.id = id;
         this.parts = List.copyOf(parts);
         this.cells = List.copyOf(cells);
+        this.engines = List.copyOf(engines);
+        this.controlSurfaces = List.copyOf(controlSurfaces);
+        for (ControlSurface c : this.controlSurfaces) {
+            if (this.parts.stream().noneMatch(p -> p.slot().equals(c.slot()))) {
+                throw new IllegalArgumentException("control surface " + c.slot() + " has no part in layout " + id);
+            }
+        }
+        for (EngineMount e : this.engines) {
+            if (this.parts.stream().noneMatch(p -> p.slot().equals(e.slot()))) {
+                throw new IllegalArgumentException("engine " + e.slot() + " has no part in layout " + id);
+            }
+        }
         List<OrientedBox> shapes = new ArrayList<>();
         for (PartInstance p : this.parts) shapes.addAll(p.hullShapes());
         this.hullShapes = Collections.unmodifiableList(shapes);
@@ -47,6 +72,20 @@ public final class ShipLayout {
         }
         this.boundsMin = new Vec3d(mn[0], mn[1], mn[2]);
         this.boundsMax = new Vec3d(mx[0], mx[1], mx[2]);
+        double[] an = {Double.MAX_VALUE, Double.MAX_VALUE, Double.MAX_VALUE};
+        double[] ax = {-Double.MAX_VALUE, -Double.MAX_VALUE, -Double.MAX_VALUE};
+        for (PartInstance p : this.parts) {
+            if (this.controlSurfaces.stream().anyMatch(c -> c.slot().equals(p.slot()))) continue;
+            for (OrientedBox b : p.hullShapes()) {
+                Vec3d lo = b.aabbMin(), hi = b.aabbMax();
+                for (int a = 0; a < 3; a++) {
+                    an[a] = Math.min(an[a], lo.get(a));
+                    ax[a] = Math.max(ax[a], hi.get(a));
+                }
+            }
+        }
+        this.aeroMin = new Vec3d(an[0], an[1], an[2]);
+        this.aeroMax = new Vec3d(ax[0], ax[1], ax[2]);
         this.contactSamples = Collections.unmodifiableList(buildContactSamples(shapes, CONTACT_SAMPLE_SPACING));
         this.sampleShapes = new int[contactSamples.size()][];
         for (int i = 0; i < contactSamples.size(); i++) {
@@ -107,6 +146,12 @@ public final class ShipLayout {
     public Vec3d localBoundsMax() { return boundsMax; }
     /** Места газовых камер (пусто у голого каркаса). */
     public List<CellSlot> cells() { return cells; }
+    /** Моторы (ТЗ 8.4); у каждого — своя деталь-гондола в {@link #parts()}. */
+    public List<EngineMount> engines() { return engines; }
+    /** Оперение с рулями (ТЗ 8.5); у каждого — своя деталь-стабилизатор в {@link #parts()}. */
+    public List<ControlSurface> controlSurfaces() { return controlSurfaces; }
+    /** Размер корпуса без оперения — для сопротивления. */
+    public Vec3d aeroSize() { return aeroMax.sub(aeroMin); }
     /** Точки контакта с миром в локальных координатах корпуса. */
     public List<Vec3d> contactSamples() { return contactSamples; }
 

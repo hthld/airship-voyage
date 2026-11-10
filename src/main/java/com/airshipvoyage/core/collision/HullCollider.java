@@ -85,7 +85,6 @@ public final class HullCollider {
         int landedOn = -1;
         boolean changed = false;
         for (int iter = 0; iter < MAX_RESOLVE_ITERATIONS; iter++) {
-            Vec3d before = v;
             boolean blocked = false;
             for (int s = 0; s < ships.size(); s++) {
                 Ship ship = ships.get(s);
@@ -99,8 +98,13 @@ public final class HullCollider {
             }
             if (!blocked) return new Resolution(v, landedOn, changed);
             changed = true;
-            v = world.clip(boxMin, boxMax, v);
-            if (same(v, before)) return new Resolution(v, landedOn, true);
+            // Итог деталей уже не входит в детали. Если блоки его не меняют — он годится для обоих, готово.
+            // (Сравнивать надо именно с итогом деталей, а не с началом прохода: обрезка деталью не идемпотентна —
+            // на наклонённом корпусе повторная обрезка уже обрезанного смещения даёт новые крошечные отличия,
+            // проходы «не сходились», и игрок стоял на месте каждый тик. Жалоба владельца после ревью 2.)
+            Vec3d w = world.clip(boxMin, boxMax, v);
+            if (same(w, v)) return new Resolution(v, landedOn, true);
+            v = w;
         }
         return new Resolution(Vec3d.ZERO, landedOn, true);
     }

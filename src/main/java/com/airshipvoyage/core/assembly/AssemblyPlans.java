@@ -13,16 +13,18 @@ import java.util.Optional;
  *
  * <p>Предметы (ключи — имена предметов мода):
  * {@value #RING} — главное кольцо, {@value #GIRDER} — продольная ферма, {@value #KEEL} — секция киля с настилом,
- * {@value #CELL} — сложенный газовый мешок.
+ * {@value #CELL} — сложенный газовый мешок, {@value #ENGINE} — моторная гондола, {@value #FIN} — стабилизатор с рулём.
  */
 public final class AssemblyPlans {
     public static final String RING = "ring_segment";
     public static final String GIRDER = "truss_section";
     public static final String KEEL = "keel_section";
     public static final String CELL = "folded_gas_cell";
+    public static final String ENGINE = "engine_pod";
+    public static final String FIN = "tail_fin";
 
     /** Этапы по ТЗ 5.4. */
-    public static final int STAGE_STRUCTURE = 2, STAGE_GAS_CELLS = 4;
+    public static final int STAGE_STRUCTURE = 2, STAGE_GAS_CELLS = 4, STAGE_EQUIPMENT = 5;
 
     private static final List<String> RINGS = List.of("ring_aft", "ring_mid", "ring_fwd");
 
@@ -42,7 +44,14 @@ public final class AssemblyPlans {
             new Step("cell_aft", Kind.CELL, CELL, STAGE_GAS_CELLS,
                     List.of("ring_aft", "ring_mid", "girder_top_port", "girder_top_stbd")),
             new Step("cell_fwd", Kind.CELL, CELL, STAGE_GAS_CELLS,
-                    List.of("ring_mid", "ring_fwd", "girder_top_port", "girder_top_stbd"))));
+                    List.of("ring_mid", "ring_fwd", "girder_top_port", "girder_top_stbd")),
+            // этап V: гондолы крепятся к боковым стойкам среднего кольца
+            new Step("engine_port", Kind.PART, ENGINE, STAGE_EQUIPMENT, List.of("ring_mid")),
+            new Step("engine_stbd", Kind.PART, ENGINE, STAGE_EQUIPMENT, List.of("ring_mid")),
+            // этап V: оперение с рулями — на кормовом кольце
+            new Step("fin_top", Kind.PART, FIN, STAGE_EQUIPMENT, List.of("ring_aft")),
+            new Step("fin_port", Kind.PART, FIN, STAGE_EQUIPMENT, List.of("ring_aft")),
+            new Step("fin_stbd", Kind.PART, FIN, STAGE_EQUIPMENT, List.of("ring_aft"))));
 
     private static final Map<String, AssemblyPlan> BY_LAYOUT = Map.of(PrototypeShip.LAYOUT_ID, PROTOTYPE);
 

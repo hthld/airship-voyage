@@ -46,6 +46,10 @@ import java.util.Locale;
  * /airship repair [камера]             — заделать пробоины
  * /airship neutral on|off              — отладка: отключить вес и подъёмную силу
  *
+ * /airship telegraph <ступень> [мотор] — машинный телеграф: full_astern … stop … full
+ * /airship rudder <°>                  — руль направления (&gt; 0 — влево), ±25
+ * /airship elevator <°>                — руль высоты (&gt; 0 — нос вверх), ±25
+ *
  * /airship build complete              — стройка: установить все оставшиеся детали
  * /airship build launch                — стройка: спуск со стапеля законченного корабля
  * </pre>
@@ -62,6 +66,14 @@ public final class AirshipCommands {
             new SimpleCommandExceptionType(Component.translatable("commands.airshipvoyage.unknown_cell"));
     private static final SimpleCommandExceptionType NO_SITE =
             new SimpleCommandExceptionType(Component.translatable("commands.airshipvoyage.no_site"));
+    private static final SimpleCommandExceptionType NO_RUDDERS =
+            new SimpleCommandExceptionType(Component.translatable("commands.airshipvoyage.no_rudders"));
+    private static final SimpleCommandExceptionType NO_ENGINES =
+            new SimpleCommandExceptionType(Component.translatable("commands.airshipvoyage.no_engines"));
+    private static final SimpleCommandExceptionType UNKNOWN_ENGINE =
+            new SimpleCommandExceptionType(Component.translatable("commands.airshipvoyage.unknown_engine"));
+    private static final SimpleCommandExceptionType UNKNOWN_STAGE =
+            new SimpleCommandExceptionType(Component.translatable("commands.airshipvoyage.unknown_stage"));
     private static final SimpleCommandExceptionType NOT_COMPLETE =
             new SimpleCommandExceptionType(Component.translatable("commands.airshipvoyage.not_complete"));
     private static final SimpleCommandExceptionType UNDER_CONSTRUCTION =
@@ -124,6 +136,21 @@ public final class AirshipCommands {
                 .then(Commands.literal("neutral")
                         .then(Commands.literal("on").executes(c -> neutral(c, true)))
                         .then(Commands.literal("off").executes(c -> neutral(c, false))))
+                .then(Commands.literal("rudder")
+                        .then(Commands.argument("degrees", DoubleArgumentType.doubleArg(-25, 25))
+                                .executes(c -> rudders(c, true))))
+                .then(Commands.literal("elevator")
+                        .then(Commands.argument("degrees", DoubleArgumentType.doubleArg(-25, 25))
+                                .executes(c -> rudders(c, false))))
+                .then(Commands.literal("telegraph")
+                        .then(Commands.argument("stage", StringArgumentType.word())
+                                .suggests((c, b) -> SharedSuggestionProvider.suggest(
+                                        java.util.Arrays.stream(com.airshipvoyage.core.propulsion.Telegraph.values())
+                                                .map(com.airshipvoyage.core.propulsion.Telegraph::key), b))
+                                .executes(c -> telegraph(c, "all"))
+                                .then(Commands.argument("engine", StringArgumentType.word())
+                                        .suggests((c, b) -> SharedSuggestionProvider.suggest(engineIds(c.getSource()), b))
+                                        .executes(c -> telegraph(c, StringArgumentType.getString(c, "engine"))))))
                 .then(Commands.literal("build")
                         .then(Commands.literal("complete").executes(AirshipCommands::buildComplete))
                         .then(Commands.literal("launch").executes(AirshipCommands::buildLaunch)))
@@ -335,9 +362,57 @@ public final class AirshipCommands {
         for (var bag : ship.flight().ballast()) {
             text.append(String.format(Locale.ROOT, "%nбалласт %s: %.0f кг", bag.id, bag.massKg()));
         }
+        for (var e : ship.flight().engines()) {
+            text.append(String.format(Locale.ROOT, "%nмотор %s: телеграф %s, мощность %.0f %%", e.id(),
+                    e.telegraph().key(), e.throttle() * 100));
+        }
+        if (!ship.layout().controlSurfaces().isEmpty()) {
+            text.append(String.format(Locale.ROOT, "%nруль направления %.0f° (команда %.0f°) · руль высоты %.0f° (команда %.0f°)",
+                    ship.flight().rudderDeg(), ship.flight().rudderCommandDeg(),
+                    ship.flight().elevatorDeg(), ship.flight().elevatorCommandDeg()));
+        }
         String out = text.toString();
         c.getSource().sendSuccess(() -> Component.literal(out), false);
         return 1;
+    }
+
+    /**
+     * Машинный телеграф (ТЗ 8.4, 9.2): ступень хода всем моторам или одному. Пока поста управления нет (AV-013),
+     * команда — единственный способ дать ход.
+     */
+    private static int telegraph(CommandContext<CommandSourceStack> c, String engine) throws CommandSyntaxException {
+        AirshipEntity ship = nearest(c.getSource());
+        if (ship.flight().engines().isEmpty()) throw NO_ENGINES.create();
+        var stage = com.airshipvoyage.core.propulsion.Telegraph.byKey(StringArgumentType.getString(c, "stage"))
+                .orElseThrow(UNKNOWN_STAGE::create);
+        if (ship.flight().setTelegraph(engine, stage) == 0) throw UNKNOWN_ENGINE.create();
+        c.getSource().sendSuccess(() -> Component.translatable("commands.airshipvoyage.telegraph",
+                Component.translatable("telegraph.airshipvoyage." + stage.key()), engine), false);
+        return 1;
+    }
+
+    /**
+     * Рули (ТЗ 8.5): руль направления (&gt; 0 — влево) или высоты (&gt; 0 — нос вверх), градусы, ±25.
+     * Пост управления на борту — AV-013; пока команда.
+     */
+    private static int rudders(CommandContext<CommandSourceStack> c, boolean rudder) throws CommandSyntaxException {
+        AirshipEntity ship = nearest(c.getSource());
+        if (ship.layout().controlSurfaces().isEmpty()) throw NO_RUDDERS.create();
+        double deg = DoubleArgumentType.getDouble(c, "degrees");
+        if (rudder) ship.flight().setRudder(deg); else ship.flight().setElevator(deg);
+        c.getSource().sendSuccess(() -> Component.translatable(
+                rudder ? "commands.airshipvoyage.rudder" : "commands.airshipvoyage.elevator", fmt(deg)), false);
+        return 1;
+    }
+
+    private static java.util.List<String> engineIds(CommandSourceStack src) {
+        try {
+            java.util.List<String> ids = new java.util.ArrayList<>(java.util.List.of("all"));
+            for (var e : nearest(src).flight().engines()) ids.add(e.id());
+            return ids;
+        } catch (CommandSyntaxException e) {
+            return java.util.List.of("all");
+        }
     }
 
     /** Отладка стройки: установить все оставшиеся детали ближайшей стройки. */

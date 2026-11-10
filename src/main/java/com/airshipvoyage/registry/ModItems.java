@@ -30,6 +30,12 @@ public final class ModItems {
     public static final DeferredItem<ShipPartItem> KEEL_SECTION = ITEMS.registerItem(AssemblyPlans.KEEL,
             p -> new ShipPartItem(AssemblyPlans.KEEL, p), new Item.Properties().stacksTo(16));
 
+    public static final DeferredItem<ShipPartItem> ENGINE_POD = ITEMS.registerItem(AssemblyPlans.ENGINE,
+            p -> new ShipPartItem(AssemblyPlans.ENGINE, p), new Item.Properties().stacksTo(4));
+
+    public static final DeferredItem<ShipPartItem> TAIL_FIN = ITEMS.registerItem(AssemblyPlans.FIN,
+            p -> new ShipPartItem(AssemblyPlans.FIN, p), new Item.Properties().stacksTo(4));
+
     public static final DeferredItem<ShipPartItem> FOLDED_GAS_CELL = ITEMS.registerItem(AssemblyPlans.CELL,
             p -> new ShipPartItem(AssemblyPlans.CELL, p), new Item.Properties().stacksTo(1));
 

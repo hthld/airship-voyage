@@ -17,11 +17,11 @@ class AssemblyPlanTest {
 
     @Test
     void prototypePlanCoversEveryPartAndCell() {
-        // 3 кольца + киль + 4 продольные фермы + 2 камеры
-        assertEquals(10, plan.steps().size());
-        assertEquals(Map.of(AssemblyPlans.RING, 3, AssemblyPlans.KEEL, 1, AssemblyPlans.GIRDER, 4, AssemblyPlans.CELL, 2),
+        // 3 кольца + киль + 4 продольные фермы + 2 камеры + 2 моторные гондолы + 3 стабилизатора
+        assertEquals(15, plan.steps().size());
+        assertEquals(Map.of(AssemblyPlans.RING, 3, AssemblyPlans.KEEL, 1, AssemblyPlans.GIRDER, 4, AssemblyPlans.CELL, 2, AssemblyPlans.ENGINE, 2, AssemblyPlans.FIN, 3),
                 plan.billOfMaterials());
-        assertEquals(2, plan.stageCount()); // этапы II и IV по ТЗ 5.4
+        assertEquals(3, plan.stageCount()); // этапы II, IV и V по ТЗ 5.4
         assertEquals(Kind.CELL, plan.step("cell_fwd").kind());
         assertEquals(1, plan.shapesOf("cell_fwd").size());
         assertEquals(4, plan.shapesOf("ring_mid").size());

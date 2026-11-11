@@ -81,6 +81,9 @@ public class AirshipEntity extends Entity {
     /** Кто стоит у штурвала (UUID строкой, пусто — никто) — клиенту, чтобы перехватывать клавиши и рисовать приборы. */
     private static final EntityDataAccessor<String> DATA_HELM =
             SynchedEntityData.defineId(AirshipEntity.class, EntityDataSerializers.STRING);
+    /** Ветер у корабля (мировой вектор, м/с) — для флюгера (D-169); обновляется раз в полсекунды. */
+    private static final EntityDataAccessor<org.joml.Vector3f> DATA_WIND =
+            SynchedEntityData.defineId(AirshipEntity.class, EntityDataSerializers.VECTOR3);
     /** Приборы поста (AV-013): телеграф, рули, скорость, высота, тяжесть, балласт, газ, люди на борту. */
     private static final EntityDataAccessor<CompoundTag> DATA_HUD =
             SynchedEntityData.defineId(AirshipEntity.class, EntityDataSerializers.COMPOUND_TAG);
@@ -134,6 +137,7 @@ public class AirshipEntity extends Entity {
         builder.define(DATA_ENGINES, new CompoundTag());
         builder.define(DATA_HELM, "");
         builder.define(DATA_HUD, new CompoundTag());
+        builder.define(DATA_WIND, new org.joml.Vector3f());
     }
 
     // ------------------------------------------------------------------ стройка (ТЗ, 4–5)
@@ -173,10 +177,29 @@ public class AirshipEntity extends Entity {
      */
     public void launch() {
         if (construction == null) return;
+        List<String> noInstrument = construction.missingOptional();
         flight.massChanged();
         flight.place(new Vec3d(getX(), getY(), getZ()), flight.body().orientation());
         setConstruction(null);
+        // не поставленные приборы (D-169) — «пустые места»: их можно поставить и на летающий корабль, как при ремонте
+        if (!noInstrument.isEmpty()) {
+            damage().destroy(noInstrument);
+            applyDamageState();
+            syncDamage();
+        }
         syncCells(true);
+    }
+
+    /** Стоит ли на корабле деталь {@code slot} (у стройки — установлена, у летающего — цела). */
+    public boolean hasPart(String slot) {
+        for (PartInstance p : visibleParts()) if (p.slot().equals(slot)) return true;
+        return false;
+    }
+
+    /** Ветер у корабля, мировой вектор (куда движется воздух), м/с — для флюгера на клиенте. */
+    public Vec3d windForRender() {
+        org.joml.Vector3f w = entityData.get(DATA_WIND);
+        return new Vec3d(w.x(), w.y(), w.z());
     }
 
     /** Коллизионные формы в локальных координатах корпуса: у стройки — только установленные детали. */
@@ -263,6 +286,7 @@ public class AirshipEntity extends Entity {
     /** Пересобрать корпус по списку разрушенного (обе стороны). Не осталось деталей — корабль исчезает. */
     private void applyDamageState() {
         repairView = null;
+        entityShapesCache = null; // мешок мог порваться посреди тика — твёрдого газа больше нет
         java.util.Set<String> partsGone = new java.util.HashSet<>();
         if (damage != null) {
             for (String s : damage.destroyed()) if (cellIndexOf(s) < 0) partsGone.add(s);
@@ -286,6 +310,15 @@ public class AirshipEntity extends Entity {
         if (!level().isClientSide && helmsman != null && damage != null && damage.isDestroyed(com.airshipvoyage.control.HelmService.HELM_PART)) {
             com.airshipvoyage.control.HelmService.release(this);
         }
+    }
+
+    /** Клиент: применить присланные повреждения к нынешнему чертежу. */
+    private void applyDamageTag() {
+        CompoundTag d = entityData.get(DATA_DAMAGE);
+        damage().restore(java.util.Map.of(), readStrings(d, "gone"));
+        applyDamageState();
+        cellBurning = new boolean[layout.cells().size()];
+        for (int i : d.getIntArray("burn")) if (i >= 0 && i < cellBurning.length) cellBurning[i] = true;
     }
 
     private void syncDamage() {
@@ -313,24 +346,65 @@ public class AirshipEntity extends Entity {
                 new Vec3d(h.x() * side, height / 2, h.z() * side), bay.rotation());
     }
 
-    /** Формы для столкновений с людьми, мобами, предметами: детали и мешки с газом (D-151). */
+    /**
+     * Формы для столкновений с людьми, мобами, предметами: детали и мешки с газом (D-151). Кэш на тик: их просит
+     * каждый шаг каждой сущности рядом с кораблём, а пересчёт мешка — это расчёт наполнения по атмосфере.
+     */
     public List<OrientedBox> entityShapes() {
+        if (entityShapesCache != null && entityShapesTick == tickCount && entityShapesHull == hullShapes()) return entityShapesCache;
         List<OrientedBox> out = new java.util.ArrayList<>(hullShapes());
         for (int i = 0; i < layout.cells().size(); i++) {
             OrientedBox g = gasBox(i);
             if (g != null) out.add(g);
         }
-        return out;
+        entityShapesCache = List.copyOf(out);
+        entityShapesTick = tickCount;
+        entityShapesHull = hullShapes();
+        return entityShapesCache;
+    }
+
+    private List<OrientedBox> entityShapesCache, entityShapesHull;
+    private int entityShapesTick = -1;
+
+    /**
+     * Полный ремонт для проверок (`/airship repair`): сломанные детали и мешки на месте, урон снят, огонь потушен,
+     * утечки заделаны, баки полны. Газ в заново подвешенных мешках — пустой.
+     */
+    public void repairAll() {
+        if (level().isClientSide || construction != null) return;
+        for (String s : List.copyOf(damage().destroyed())) {
+            int ci = cellIndexOf(s);
+            if (ci >= 0) flight.repairCell(ci);
+        }
+        damage().restore(java.util.Map.of(), List.of());
+        for (GasCell c : flight.cells()) {
+            c.extinguish();
+            c.setLeakPerSecond(0);
+        }
+        pendingIgnition.clear();
+        applyDamageState(); // моторы восстановленных гондол возвращаются в replaceLayout
+        for (var e : flight.engines()) e.refuel(com.airshipvoyage.core.propulsion.Engine.TANK_KG);
+        flight.massChanged();
+        syncDamage();
+        syncCells(true);
+        syncEngines(true);
     }
 
     /** На сколько коробка сущности должна погрузиться в деталь, чтобы её выдавливали, м. */
     private static final double PUSH_DEPTH = 0.05;
 
+    /** Корабль «садится» на сущность, если в её точке корпус опускается быстрее этого, м/тик (0,4 м/с). */
+    private static final double LANDING_SINK_PER_TICK = 0.02;
+
     /**
      * Кто оказался внутри корпуса — корабль наехал, поднялся под ним, опустился на него (D-152), — того
-     * выдавить наружу по кратчайшему пути, а если корабль двигался — по его ходу. Если выдавить некуда (прижат к
-     * земле или стене), сервер ранит его (как падающий блок: 4 + 20 × скорость корпуса в блоках/тик) и
-     * выбрасывает вбок из-под корпуса. Сервер — мобы и предметы; клиент — свой игрок; игрока ранит сервер.
+     * выдавить наружу по кратчайшему пути, а если корабль двигался — по его ходу. Выдавливание — сдвигом, без
+     * толчка скоростью: корабль в полёте не «батут» (D-168).
+     *
+     * <p>Урон и выброс — только когда корабль <b>опускается</b> на прижатого к земле (в его точке корпус идёт вниз
+     * быстрее {@link #LANDING_SINK_PER_TICK}): урон как от падающего блока (4 + 20 × скорость корпуса в блоках/тик),
+     * мягкий выброс вбок из-под корпуса. Прижатого боком или снизу просто сдвигает вбок, сколько пускают блоки.
+     * Сервер — мобы и предметы; клиент — свой игрок; игрока ранит сервер.
      */
     private void pushOutEntities(Vec3d oldPos, Quat oldRot) {
         Vec3d pos = new Vec3d(getX(), getY(), getZ());
@@ -378,26 +452,41 @@ public class AirshipEntity extends Entity {
             net.minecraft.world.phys.Vec3 want = new net.minecraft.world.phys.Vec3(pushW.x(), pushW.y(), pushW.z());
             net.minecraft.world.phys.Vec3 allowed = Entity.collideBoundingBox(e, want, bb, level(), List.of());
             boolean pinned = allowed.length() < want.length() * 0.5;
+            boolean serverPlayer = !client && e instanceof net.minecraft.world.entity.player.Player;
             if (!pinned) {
-                if (client || !(e instanceof net.minecraft.world.entity.player.Player)) {
-                    e.setPos(e.getX() + allowed.x, e.getY() + allowed.y, e.getZ() + allowed.z);
-                } else {
-                    e.setDeltaMovement(e.getDeltaMovement().add(want.scale(0.5)));
-                    e.hurtMarked = true;
-                }
+                // сдвиг, а не толчок скоростью: импульс копился за тики и подбрасывал игрока (D-168).
+                // Своего игрока выдавливает его клиент.
+                if (!serverPlayer) e.setPos(e.getX() + allowed.x, e.getY() + allowed.y, e.getZ() + allowed.z);
                 continue;
             }
-            if (client) continue; // придавленного ранит и выбрасывает сервер
-            // прижат: урон и выброс вбок — в ближайшую сторону по горизонтали корпуса
+            // прижат: выход — вбок, в ближайшую сторону по горизонтали корпуса
             int side = exit[0] <= exit[1] ? 0 : 1;
             int sideZ = exit[4] <= exit[5] ? 4 : 5;
             if (exit[sideZ] < exit[side]) side = sideZ;
             Vec3d out = rot.rotate(axisDir(side));
+            boolean landing = rot.rotate(shipMove).y() < -LANDING_SINK_PER_TICK;
+            if (!landing) {
+                // корабль идёт боком или поднимается — без урона и без выброса: сдвиг вбок, в ближайшую свободную
+                // сторону, не больше 0,5 м за тик (выход вдоль киля бывает 10 м — не телепортировать)
+                if (serverPlayer) continue;
+                Integer[] order = {0, 1, 4, 5};
+                java.util.Arrays.sort(order, java.util.Comparator.comparingDouble(k -> exit[k]));
+                for (int k : order) {
+                    Vec3d step = rot.rotate(axisDir(k)).scale(Math.min(exit[k] + 0.01, 0.5));
+                    var moved = Entity.collideBoundingBox(e, new net.minecraft.world.phys.Vec3(step.x(), 0, step.z()), bb, level(), List.of());
+                    if (moved.horizontalDistance() > 0.05) {
+                        e.setPos(e.getX() + moved.x, e.getY(), e.getZ() + moved.z);
+                        break;
+                    }
+                }
+                continue;
+            }
+            if (client) continue; // придавленного посадкой ранит и выбрасывает сервер
             double speed = shipMove.length();
             if (e instanceof net.minecraft.world.entity.LivingEntity living) {
                 living.hurt(damageSources().fallingBlock(this), (float) (4 + 20 * speed));
             }
-            e.setDeltaMovement(out.x() * 0.8, 0.45, out.z() * 0.8);
+            e.setDeltaMovement(out.x() * 0.35, 0.15, out.z() * 0.35); // мягко из-под корпуса, не вверх
             e.hurtMarked = true;
         }
     }
@@ -555,7 +644,9 @@ public class AirshipEntity extends Entity {
      */
     public ConstructionState installState() {
         if (construction != null) return construction;
-        if (damage == null || damage.destroyed().isEmpty()) return null;
+        // обломок — остов для разборки, а не основа нового корабля (ревью: вокруг гондолы-обломка можно было
+        // поставить кольца, киль и мешки и получить летающий корпус; вокруг каждого обломка висели «призраки» корабля)
+        if (wreck || damage == null || damage.destroyed().isEmpty()) return null;
         var plan = AssemblyPlans.byLayoutId(layout.id()).orElse(null);
         if (plan == null) return null;
         if (repairView == null) {
@@ -822,6 +913,8 @@ public class AirshipEntity extends Entity {
             if (bay.distanceTo(new Vec3d(e.getX(), e.getY() + e.getBbHeight() / 2, e.getZ())) <= 1.5) e.igniteForSeconds(4);
         }
         if (random.nextDouble() >= 0.3) return;
+        // огонь на блоки — только где он вообще распространяется (правило doFireTick), как у ванильного огня
+        if (!level().getGameRules().getBoolean(net.minecraft.world.level.GameRules.RULE_DOFIRETICK)) return;
         double x = c.x() + (random.nextDouble() * 2 - 1) * h.x(), z = c.z() + (random.nextDouble() * 2 - 1) * h.z();
         int y0 = (int) Math.floor(c.y() - h.y());
         for (int y = y0; y > y0 - 8; y--) {
@@ -865,7 +958,20 @@ public class AirshipEntity extends Entity {
     public FlightModel flight() { return flight; }
 
     /** Окружение для физики — блоки и атмосфера этого мира. */
-    public WorldEnvironment environment() { return new WorldEnvironment(level()); }
+    /**
+     * Окружение корабля: одно на корабль (ревью: создавалось на каждый вызов, а ветер запрашивается на каждом
+     * подшаге по каждому рулю и мотору). Пересоздаётся раз в 100 тиков — подхватить изменённые настройки высоты.
+     */
+    public WorldEnvironment environment() {
+        if (env == null || env.level() != level() || tickCount - envTick >= 100) {
+            env = new WorldEnvironment(level());
+            envTick = tickCount;
+        }
+        return env;
+    }
+
+    private WorldEnvironment env;
+    private int envTick;
 
     /** Наполнение камер для рендера (клиент) — 0..1 по порядку {@code layout().cells()}. */
     public float[] cellFillForRender() { return cellFill; }
@@ -931,6 +1037,7 @@ public class AirshipEntity extends Entity {
         Vec3d wind = env.wind(new Vec3d(getX(), getY(), getZ()));
         t.putFloat("wx", (float) wind.x());
         t.putFloat("wz", (float) wind.z());
+        t.putBoolean("vane", hasPart(com.airshipvoyage.core.assembly.AssemblyPlans.WEATHERVANE)); // прибор ветра (D-169)
         Vec3d air = flight.body().velocity().sub(wind);
         t.putFloat("air", (float) Math.hypot(air.x(), air.z()));
         // моторы: борт, фактическая доля мощности и куда она тянется (телеграф + поправка от руля)
@@ -1183,6 +1290,12 @@ public class AirshipEntity extends Entity {
                     this.layout = l;
                     cellFill = new float[l.cells().size()];
                     cellLeaking = new boolean[l.cells().size()];
+                    // повреждения считались по прежнему чертежу (ревью: клиент видел и задевал «призрачные» детали)
+                    damage = null;
+                    intact = null;
+                    cellGone = new boolean[l.cells().size()];
+                    cellBurning = new boolean[l.cells().size()];
+                    applyDamageTag();
                 }
                 applyConstructionTag();
                 reapplyPosition();
@@ -1190,11 +1303,7 @@ public class AirshipEntity extends Entity {
         } else if (DATA_CONSTRUCTION.equals(key)) {
             applyConstructionTag();
         } else if (DATA_DAMAGE.equals(key)) {
-            CompoundTag d = entityData.get(DATA_DAMAGE);
-            damage().restore(java.util.Map.of(), readStrings(d, "gone"));
-            applyDamageState();
-            cellBurning = new boolean[layout.cells().size()];
-            for (int i : d.getIntArray("burn")) if (i >= 0 && i < cellBurning.length) cellBurning[i] = true;
+            applyDamageTag();
         } else if (DATA_ENGINES.equals(key)) {
             CompoundTag et = entityData.get(DATA_ENGINES);
             ListTag t = et.getList("t", Tag.TAG_FLOAT);
@@ -1264,6 +1373,7 @@ public class AirshipEntity extends Entity {
     private void tickServer() {
         RigidBody body = flight.body();
         if (tickCount % 100 == 0) updateRecord();
+        if (tickCount % 10 == 0) syncWind();
         tickFire();
         // На случай, если позицию поменял кто-то извне (/tp, загрузка мира).
         Vec3d entityPos = new Vec3d(getX(), getY(), getZ());
@@ -1273,6 +1383,7 @@ public class AirshipEntity extends Entity {
             // на стапеле корабль неподвижен: физика полёта не считается (ТЗ 5.4 — спуск только после постройки)
             flight.tickGas(DT, environment());
             if (tickCount % 5 == 0) syncCells(false);
+            pushOutEntities(entityPos, oldRot); // как на клиенте: застрявших в деталях стапеля — наружу (ревью)
             body.freeze();
             setDeltaMovement(net.minecraft.world.phys.Vec3.ZERO);
             return;
@@ -1319,6 +1430,15 @@ public class AirshipEntity extends Entity {
         }
         carryStandingEntities(entityPos, oldRot, p, body.orientation());
         pushOutEntities(entityPos, oldRot);
+    }
+
+    /** Ветер для флюгера: раз в полсекунды и только если заметно изменился (поворот ветра — градусы в секунду). */
+    private void syncWind() {
+        Vec3d w = environment().wind(new Vec3d(getX(), getY(), getZ()));
+        org.joml.Vector3f old = entityData.get(DATA_WIND);
+        if (Math.abs(old.x() - w.x()) + Math.abs(old.z() - w.z()) > 0.05) {
+            entityData.set(DATA_WIND, new org.joml.Vector3f((float) w.x(), 0, (float) w.z()));
+        }
     }
 
     private void tickClient() {

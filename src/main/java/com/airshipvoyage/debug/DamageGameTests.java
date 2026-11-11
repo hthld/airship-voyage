@@ -162,6 +162,44 @@ public final class DamageGameTests {
         h.succeed();
     }
 
+    /**
+     * Приборы необязательны (D-169): стройка без флюгера спускается; у спущенного корабля флюгера нет, мачта не
+     * мешает и не весит, место предлагается для установки; поставленный флюгер стоит, масса прежняя (флюгер — 0 кг).
+     */
+    @GameTest(template = DOCK, batch = "damage")
+    public static void weathervaneIsAnOptionalInstrument(GameTestHelper h) {
+        var plan = com.airshipvoyage.core.assembly.AssemblyPlans.prototype();
+        var anchor = net.minecraft.core.BlockPos.containing(h.absoluteVec(new Vec3(14, 2, 14)));
+        double floor = anchor.getY();
+        for (int y = anchor.getY(); y > h.getLevel().getMinBuildHeight(); y--) {
+            var bp = new net.minecraft.core.BlockPos(anchor.getX(), y, anchor.getZ());
+            if (!h.getLevel().getBlockState(bp).getCollisionShape(h.getLevel(), bp).isEmpty()) { floor = y; break; }
+        }
+        var base = new net.minecraft.core.BlockPos(anchor.getX(), (int) floor, anchor.getZ());
+        var aim = com.airshipvoyage.assembly.ConstructionSites.check(h.getLevel(), plan, base, 0);
+        h.assertTrue(aim.result().ok(), "site rejected: " + aim.result());
+        AirshipEntity ship = com.airshipvoyage.assembly.ConstructionSites.spawnSite(h.getLevel(), plan, aim.placement());
+        for (var step : plan.steps()) if (!step.optional()) ship.construction().install(step.slot(), step.itemKey());
+        ship.constructionChanged();
+        h.assertTrue(ship.construction().complete(), "required parts installed, but not complete");
+        int shapes = plan.layout().hullShapes().size();
+        ship.launch();
+        String vane = com.airshipvoyage.core.assembly.AssemblyPlans.WEATHERVANE;
+        h.assertTrue(!ship.isUnderConstruction() && !ship.hasPart(vane), "launched ship has a weathervane nobody fitted");
+        h.assertTrue(ship.hullShapes().size() == shapes - 1, "vane mast still collides: " + ship.hullShapes().size());
+        var state = ship.installState();
+        h.assertTrue(state != null && state.check(vane, vane).ok(), "weathervane place not offered");
+        double mass = ship.body().massKg();
+        ship.repairSlot(vane);
+        AirshipVoyage.LOGGER.info("[test] weathervane fitted after launch: present {}, shapes {} -> {}, mass {} -> {}",
+                ship.hasPart(vane), shapes - 1, ship.hullShapes().size(), mass, ship.body().massKg());
+        h.assertTrue(ship.hasPart(vane) && ship.hullShapes().size() == shapes, "weathervane not fitted");
+        h.assertTrue(Math.abs(ship.body().massKg() - mass) < 1e-9, "weathervane changed the mass");
+        h.assertTrue(ship.installState() == null, "still something to fit");
+        ship.discard();
+        h.succeed();
+    }
+
     /** На стапеле удар снимает деталь (не ломает) вместе со всем, что на ней стоит, и отдаёт их предметами. */
     @GameTest(template = DOCK, batch = "damage")
     public static void slipwayPartsAreDismantled(GameTestHelper h) {
@@ -219,6 +257,21 @@ public final class DamageGameTests {
         ship.repairSlot("cell_fwd");
         var cell = ship.flight().cells().get(fwd);
         h.assertTrue(ship.cellPresent(fwd) && !cell.destroyed() && cell.amountMol() == 0, "new cell should hang empty");
+
+        // гондола: сломана — мотора нет, поставлена заново — мотор снова есть (раньше не возвращался)
+        ship.hitSlot("engine_port", 100, null, false);
+        h.assertTrue(ship.flight().engine("engine_port") == null, "engine left after the gondola broke");
+        ship.repairSlot("engine_port");
+        h.assertTrue(ship.flight().engine("engine_port") != null, "repaired gondola has no engine");
+
+        // полный ремонт (/airship repair): всё сломанное на месте, урона и утечек нет, газ в целых мешках сохранён
+        double gasAft = ship.flight().cells().get(ship.flight().cellIndex("cell_aft")).amountMol();
+        ship.hitSlot("ring_mid", 1000, null, false);
+        ship.hitSlot("fin_port", 5, null, false);
+        ship.repairAll();
+        h.assertTrue(ship.damage().destroyed().isEmpty() && ship.damage().damageTaken().isEmpty(), "not fully repaired");
+        h.assertTrue(ship.flight().engines().size() == 2, "engines " + ship.flight().engines().size());
+        h.assertTrue(ship.flight().cells().get(ship.flight().cellIndex("cell_aft")).amountMol() == gasAft, "repair lost gas");
         ship.discard();
         h.succeed();
     }
@@ -253,6 +306,68 @@ public final class DamageGameTests {
                 .map(r -> r.value().assemble(input, h.getLevel().registryAccess())).orElse(e);
         h.assertTrue(out.is(ModItems.TRUSS_SECTION.get()) && out.getCount() == 2, "truss craft gave " + out);
         h.succeed();
+    }
+
+    /**
+     * Струя огнетушителя (D-165): пока держишь ПКМ, пена тушит блок огня и горящую свинью на пути струи, а снизу —
+     * горящий мешок (струя проходит мимо киля); заряд тратится по тику.
+     */
+    @GameTest(template = DOCK, timeoutTicks = 100, batch = "fire")
+    public static void extinguisherSprayPutsOutFireMobsAndCells(GameTestHelper h) {
+        AirshipEntity ship = flyingShip(h);
+        var base = new net.minecraft.core.BlockPos(4, 1, 4);
+        h.setBlock(base, net.minecraft.world.level.block.Blocks.NETHERRACK);
+        h.setBlock(base.above(), net.minecraft.world.level.block.Blocks.FIRE);
+        var firePos = h.absolutePos(base.above());
+        h.assertTrue(h.getLevel().getBlockState(firePos).is(net.minecraft.world.level.block.Blocks.FIRE), "no fire placed");
+        Player player = h.makeMockPlayer(GameType.SURVIVAL);
+        Vec3 feet = h.absoluteVec(new Vec3(4.5, 2, 8.5));
+        player.setPos(feet.x, feet.y, feet.z);
+        aimAt(player, Vec3.atCenterOf(firePos));
+        var pig = net.minecraft.world.entity.EntityType.PIG.create(h.getLevel());
+        Vec3 onLine = player.getEyePosition().lerp(Vec3.atCenterOf(firePos), 0.5);
+        pig.moveTo(onLine.x, onLine.y - 0.45, onLine.z, 0, 0);
+        pig.setNoGravity(true);
+        pig.setNoAi(true);
+        h.getLevel().addFreshEntity(pig);
+        pig.igniteForSeconds(10);
+        var item = ModItems.FIRE_EXTINGUISHER.get();
+        var stack = new net.minecraft.world.item.ItemStack(item);
+        player.setItemInHand(net.minecraft.world.InteractionHand.MAIN_HAND, stack);
+        item.use(h.getLevel(), player, net.minecraft.world.InteractionHand.MAIN_HAND);
+        h.assertTrue(player.isUsingItem(), "extinguisher does not spray while held");
+        item.onUseTick(h.getLevel(), player, stack, 72000);
+        AirshipVoyage.LOGGER.info("[test] spray: fire block {}, pig burning {}, charge used {}",
+                h.getLevel().getBlockState(firePos).getBlock(), pig.isOnFire(), stack.getDamageValue());
+        h.assertTrue(h.getLevel().getBlockState(firePos).isAir(), "fire block not put out");
+        h.assertTrue(!pig.isOnFire(), "burning pig in the spray not put out");
+        h.assertTrue(stack.getDamageValue() == 1, "charge not used per tick: " + stack.getDamageValue());
+        h.assertTrue(ship.igniteCell("cell_aft"), "not ignited");
+        h.runAfterDelay(10, () -> {
+            int aft = ship.flight().cellIndex("cell_aft");
+            var cell = ship.flight().cells().get(aft);
+            h.assertTrue(cell.burning(), "cell is not burning");
+            var bay = ship.layout().cells().get(aft).bay();
+            Vec3 under = world(ship, bay.center().x(), bay.center().y() - bay.halfExtents().y() - 4.5, 2.0);
+            player.setPos(under.x, under.y, under.z);
+            aimAt(player, world(ship, bay.center().x(), bay.center().y(), 2.0));
+            int put = com.airshipvoyage.damage.FireExtinguisherItem.spray(h.getLevel(), player,
+                    player.getEyePosition(), player.getViewVector(1.0F)); // один тик струи
+            AirshipVoyage.LOGGER.info("[test] spray up at the cell from {} m: put out {}, burning {}",
+                    4.5 - player.getEyeHeight(), put, cell.burning());
+            h.assertTrue(!cell.burning() && !cell.destroyed(), "spray did not put out the cell");
+            pig.discard();
+            ship.discard();
+            h.succeed();
+        });
+    }
+
+    private static void aimAt(Player player, Vec3 target) {
+        Vec3 eye = player.getEyePosition();
+        double x = target.x - eye.x, y = target.y - eye.y, z = target.z - eye.z;
+        player.setYRot((float) Math.toDegrees(Math.atan2(-x, z)));
+        player.setYHeadRot(player.getYRot()); // LivingEntity.getViewYRot читает поворот головы, не тела
+        player.setXRot((float) -Math.toDegrees(Math.atan2(y, Math.hypot(x, z))));
     }
 
     private static net.minecraft.world.entity.monster.Zombie idleZombie(GameTestHelper h, Vec3 at) {
@@ -318,6 +433,60 @@ public final class DamageGameTests {
             ship.discard();
             h.succeed();
         });
+    }
+
+    /**
+     * Не батут (D-168): корабль идёт боком (2 м/с) низко над полом и задевает нижней фермой жителя, который упёрся
+     * в блок, — без урона и не подброшен, его просто сдвигает из-под корпуса. Урон — только при посадке сверху.
+     * (Житель, а не зомби: зомби горит на солнце, и этот урон путается с уроном от корпуса; свинья ниже фермы.)
+     */
+    @GameTest(template = DOCK, timeoutTicks = 120, batch = "collision")
+    public static void shipMovingSidewaysDoesNotHurtOrBounceMobs(GameTestHelper h) {
+        AirshipEntity ship = new AirshipEntity(ModEntities.AIRSHIP.get(), h.getLevel());
+        ship.setLayoutById(PrototypeShip.LAYOUT_ID);
+        double lowest = ship.layout().localBoundsMin().y();
+        Vec3 floor = floorTop(h, new Vec3(14, 2, 10));
+        ship.placeAt(new Vec3d(floor.x, floor.y + 1.1 - lowest, floor.z), Quat.IDENTITY);
+        ship.flight().weighOff(ship.environment());
+        ship.flight().setNeutral(true);
+        h.getLevel().addFreshEntity(ship);
+        var z = net.minecraft.world.entity.EntityType.VILLAGER.create(h.getLevel());
+        z.setNoAi(true);
+        z.moveTo(floor.x + 2.5, floor.y, floor.z + 6.6, 0, 0);
+        h.getLevel().addFreshEntity(z);
+        var pillar = net.minecraft.core.BlockPos.containing(z.getX(), z.getY(), z.getZ() + 0.8);
+        h.getLevel().setBlock(pillar, net.minecraft.world.level.block.Blocks.STONE.defaultBlockState(), 3);
+        float hp0 = z.getHealth();
+        double[] worst = {0, 0}; // наибольший подъём над полом, наибольшая скорость вверх
+        int[] ticks = {0};
+        h.onEachTick(() -> {
+            if (ticks[0]++ < 40) ship.body().setVelocity(new Vec3d(0, 0, 2));
+            worst[0] = Math.max(worst[0], z.getY() - floor.y);
+            worst[1] = Math.max(worst[1], z.getDeltaMovement().y);
+        });
+        h.runAfterDelay(60, () -> {
+            Vec3d l = ship.body().worldToLocal(new Vec3d(z.getX(), z.getY(), z.getZ()));
+            AirshipVoyage.LOGGER.info("[test] ship swept a villager sideways: health {} -> {}, rise {} m, up speed {} b/t, local ({}, {}, {})",
+                    hp0, z.getHealth(), String.format("%.2f", worst[0]), String.format("%.3f", worst[1]),
+                    String.format("%.2f", l.x()), String.format("%.2f", l.y()), String.format("%.2f", l.z()));
+            h.assertTrue(z.getHealth() == hp0, "villager hurt by a ship that was not landing: " + z.getHealth());
+            h.assertTrue(worst[0] < 0.6 && worst[1] < 0.2, "villager bounced: rise " + worst[0] + ", up " + worst[1]);
+            z.discard();
+            ship.discard();
+            h.succeed();
+        });
+    }
+
+    /** Верх пола дока под точкой: первый блок с коллизией сверху вниз. */
+    private static Vec3 floorTop(GameTestHelper h, Vec3 rel) {
+        Vec3 a = h.absoluteVec(rel);
+        var level = h.getLevel();
+        for (int y = (int) Math.floor(a.y); y > level.getMinBuildHeight(); y--) {
+            var bp = net.minecraft.core.BlockPos.containing(a.x, y, a.z);
+            var shape = level.getBlockState(bp).getCollisionShape(level, bp);
+            if (!shape.isEmpty()) return new Vec3(a.x, y + shape.max(net.minecraft.core.Direction.Axis.Y), a.z);
+        }
+        return a;
     }
 
     /**
@@ -400,6 +569,7 @@ public final class DamageGameTests {
             h.assertTrue(w.visibleParts().size() == 1 && w.visibleParts().get(0).slot().startsWith("engine"), "wreck parts "
                     + w.visibleParts().stream().map(p -> p.slot()).toList());
         }
+        h.assertTrue(wrecks.stream().allMatch(w -> w.installState() == null), "a wreck offers to be rebuilt into a ship");
         AirshipEntity w0 = wrecks.get(0);
         double y0 = w0.getY();
         h.runAfterDelay(20, () -> {

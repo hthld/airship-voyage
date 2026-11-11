@@ -148,7 +148,7 @@
   "message.airshipvoyage.repair.nothing": "%s: nothing to repair (or the cell is burning)",
   "message.airshipvoyage.fire.no_hydrogen": "%s: won't burn — only hydrogen cells can be ignited",
   "item.airshipvoyage.fire_extinguisher": "Minimax Fire Extinguisher",
-  "item.airshipvoyage.fire_extinguisher.hint": "Right-click a burning gas cell to put it out (8 charges); puts you out if you burn",
+  "item.airshipvoyage.fire_extinguisher.hint": "Hold right-click to spray foam (6 m, 12 s of charge): puts out fire, burning mobs and burning gas cells",
   "message.airshipvoyage.fire.out": "%s extinguished",
   "key.airshipvoyage.autopilot": "Toggle autopilot",
   "item.airshipvoyage.fuel_canister": "Petrol Can",
@@ -179,5 +179,10 @@
   "hud.airshipvoyage.dir_s": "S",
   "hud.airshipvoyage.dir_sw": "SW",
   "hud.airshipvoyage.dir_w": "W",
-  "hud.airshipvoyage.dir_nw": "NW"
+  "hud.airshipvoyage.dir_nw": "NW",
+  "item.airshipvoyage.weathervane": "Weathervane with Compass Rose",
+  "part.airshipvoyage.weathervane": "weathervane",
+  "item.airshipvoyage.weathervane.hint": "Instrument: fits on the bow ring, shows the wind at the helm",
+  "hud.airshipvoyage.wind_no_instrument": "Wind: no instrument — fit a weathervane",
+  "message.airshipvoyage.blueprint.optional": "Instruments (optional): %s"
 }

@@ -75,10 +75,13 @@ public class AirshipRenderer extends EntityRenderer<AirshipEntity> {
         for (PartInstance part : ship.visibleParts()) {
             VertexConsumer vc = buffers.getBuffer(RenderType.entityCutout(materialTexture(part.type().material())));
             var surface = surfaceOf(layout, part.slot());
+            boolean helm = part.type().id().equals("helm");
             for (OrientedBox box : part.hullShapes()) {
                 if (surface != null) drawControlSurface(ship, surface, box, partialTick, last, vc, packedLight);
                 else drawBox(last, vc, box, packedLight, 0xFFFFFFFF);
             }
+            if (helm) for (OrientedBox box : part.hullShapes()) drawWheel(ship, part, box, partialTick, last, buffers, packedLight);
+            if (part.type().id().equals("weathervane")) drawWeathervane(ship, part, q, last, buffers, packedLight);
         }
         drawCells(ship, last, buffers, packedLight);
         // Штуцеры остаются под отсеком даже у пустого мешка: заправка с киля (ТЗ 7.3).
@@ -94,8 +97,12 @@ public class AirshipRenderer extends EntityRenderer<AirshipEntity> {
     }
 
     /**
-     * Винты моторов (ТЗ 8.4): две деревянные лопасти 1,7 м на оси тяги, вращаются по доле мощности, которую
+     * Винты моторов (ТЗ 8.4): двухлопастный деревянный винт 1,8 м на оси тяги, вращается по доле мощности, которую
      * присылает сервер. Только визуально — у винта нет коллизии. У стройки — только у установленных гондол.
+     *
+     * <p>Вид — в «блочном» стиле корпуса (D-167): лопасть из двух брусков (узкий комель, широкое перо) с шагом 12°,
+     * латунная оковка конца, стальная ступица с латунным колпаком. Текстуры кладутся по метрам, как на корпусе, —
+     * без растяжения на грань.
      */
     private void drawPropellers(AirshipEntity ship, float partialTick, PoseStack.Pose pose, MultiBufferSource buffers, int light) {
         var engines = ship.layout().engines();
@@ -107,16 +114,100 @@ public class AirshipRenderer extends EntityRenderer<AirshipEntity> {
             if (ship.visibleParts().stream().noneMatch(p -> p.slot().equals(mount.slot()))) continue; // гондолы нет
             // винт — снаружи торца гондолы: перед тянущим, за толкающим (D-139)
             Vec3d pod = podCentre(ship.layout(), mount.slot());
-            double out = pod == null || mount.thrustPoint().sub(pod).dot(mount.axis()) >= 0 ? 0.06 : -0.06;
-            Vec3d hub = mount.thrustPoint().add(mount.axis().scale(out));
+            double out = pod == null || mount.thrustPoint().sub(pod).dot(mount.axis()) >= 0 ? 1 : -1;
+            Vec3d hub = mount.thrustPoint().add(mount.axis().scale(0.08 * out));
             double angle = ship.propAngle(i, partialTick);
-            // двухлопастный деревянный винт 1,8 м и стальная ступица; текстура лопасти растянута на всю грань
+            VertexConsumer wood = buffers.getBuffer(RenderType.entityCutout(materialTexture("wood")));
+            for (int b = 0; b < 2; b++) {
+                // ось винта — ось X корпуса; вторая лопасть — первая, повёрнутая на 180° вокруг оси (симметрия винта)
+                Quat q = Quat.fromAxisAngle(mount.axis(), angle + Math.PI * b).mul(Quat.fromAxisAngle(Vec3d.UNIT_Y, Math.toRadians(12)));
+                drawBox(pose, wood, new OrientedBox(hub.add(q.rotate(new Vec3d(0, 0.29, 0))), new Vec3d(0.04, 0.18, 0.065), q), light, 0xFFFFFFFF);
+                drawBox(pose, wood, new OrientedBox(hub.add(q.rotate(new Vec3d(0, 0.63, 0))), new Vec3d(0.045, 0.17, 0.105), q), light, 0xFFFFFFFF);
+            }
+            VertexConsumer brass = buffers.getBuffer(RenderType.entityCutout(materialTexture("brass")));
+            for (int b = 0; b < 2; b++) {
+                Quat q = Quat.fromAxisAngle(mount.axis(), angle + Math.PI * b).mul(Quat.fromAxisAngle(Vec3d.UNIT_Y, Math.toRadians(12)));
+                drawBox(pose, brass, new OrientedBox(hub.add(q.rotate(new Vec3d(0, 0.85, 0))), new Vec3d(0.05, 0.05, 0.1), q), light, 0xFFFFFFFF);
+            }
             Quat spin = Quat.fromAxisAngle(mount.axis(), angle);
-            drawBoxFit(pose, buffers.getBuffer(RenderType.entityCutout(materialTexture("propeller"))),
-                    new OrientedBox(hub, new Vec3d(0.05, 0.9, 0.11), spin), light, 0xFFFFFFFF);
-            drawBox(pose, buffers.getBuffer(RenderType.entityCutout(materialTexture("engine"))),
-                    new OrientedBox(hub, new Vec3d(0.11, 0.13, 0.13), spin), light, 0xFFFFFFFF);
+            drawBox(pose, brass, new OrientedBox(hub.add(mount.axis().scale(0.12 * out)), new Vec3d(0.04, 0.07, 0.07), spin), light, 0xFFFFFFFF);
+            drawBox(pose, buffers.getBuffer(RenderType.entityCutout(materialTexture("steel"))),
+                    new OrientedBox(hub, new Vec3d(0.09, 0.12, 0.12), spin), light, 0xFFFFFFFF);
         }
+    }
+
+    /**
+     * Штурвальный пост (D-167): тумба из досок с латунными уголками и поясом, на кормовой стороне — штурвал лицом
+     * к рулевому. Штурвал «блочный»: восьмигранный обод из брусков, 8 спиц, выходящих за обод рукоятками, латунная
+     * ступица на стальной оси. Крутится вместе с рулём направления — на полную перекладку (30°) почти пол-оборота.
+     */
+    private void drawWheel(AirshipEntity ship, PartInstance post, OrientedBox box, float partialTick, PoseStack.Pose pose,
+                           MultiBufferSource buffers, int light) {
+        Vec3d pc = box.center(), ph = box.halfExtents();
+        Quat pr = box.rotation();
+        VertexConsumer brass = buffers.getBuffer(RenderType.entityCutout(materialTexture("brass")));
+        for (int sx = -1; sx <= 1; sx += 2) {
+            for (int sz = -1; sz <= 1; sz += 2) { // уголки по вертикальным рёбрам тумбы
+                drawBox(pose, brass, new OrientedBox(pc.add(pr.rotate(new Vec3d(sx * ph.x(), 0, sz * ph.z()))),
+                        new Vec3d(0.035, ph.y() + 0.01, 0.035), pr), light, 0xFFFFFFFF);
+            }
+        }
+        drawBox(pose, brass, new OrientedBox(pc.add(pr.rotate(new Vec3d(0, ph.y() - 0.1, 0))),
+                new Vec3d(ph.x() + 0.02, 0.03, ph.z() + 0.02), pr), light, 0xFFFFFFFF); // пояс под крышкой
+
+        Vec3d c = pc.add(pr.rotate(new Vec3d(-ph.x() - 0.07, 0.3, 0)));
+        Quat spin = pr.mul(Quat.fromAxisAngle(Vec3d.UNIT_X, Math.toRadians(ship.rudderForRender(partialTick) * 5.5)));
+        VertexConsumer wood = buffers.getBuffer(RenderType.entityCutout(materialTexture("wood")));
+        double r = 0.40, seg = r * Math.tan(Math.PI / 8) + 0.02; // восьмигранник: апофема r, полусторона r·tg 22,5°
+        for (int k = 0; k < 8; k++) {
+            Quat q = spin.mul(Quat.fromAxisAngle(Vec3d.UNIT_X, Math.PI * k / 4));
+            drawBox(pose, wood, new OrientedBox(c.add(q.rotate(new Vec3d(0, r, 0))), new Vec3d(0.04, 0.04, seg), q), light, 0xFFFFFFFF);
+            drawBox(pose, wood, new OrientedBox(c.add(q.rotate(new Vec3d(0, r / 2, 0))), new Vec3d(0.025, r / 2, 0.025), q), light, 0xFFFFFFFF);
+            drawBox(pose, wood, new OrientedBox(c.add(q.rotate(new Vec3d(0, r + 0.11, 0))), new Vec3d(0.035, 0.07, 0.035), q), light, 0xFFFFFFFF);
+        }
+        drawBox(pose, buffers.getBuffer(RenderType.entityCutout(materialTexture("brass"))),
+                new OrientedBox(c, new Vec3d(0.05, 0.08, 0.08), spin), light, 0xFFFFFFFF);
+        drawBox(pose, buffers.getBuffer(RenderType.entityCutout(materialTexture("steel"))),
+                new OrientedBox(c.add(pr.rotate(new Vec3d(0.04, 0, 0))), new Vec3d(0.04, 0.025, 0.025), pr), light, 0xFFFFFFFF);
+    }
+
+    /**
+     * Флюгер (D-169): на мачте — компасная роза, повёрнутая по сторонам света (северный конец красный), выше — стрелка
+     * с петушком, головой и остриём против ветра (откуда дует). Мачта — сама деталь; это рисунок поверх неё.
+     * Стороны света и ветер — мировые, поэтому их пересчитываем в оси корпуса через ориентацию корабля.
+     */
+    private void drawWeathervane(AirshipEntity ship, PartInstance mast, Quat shipRot, PoseStack.Pose pose,
+                                 MultiBufferSource buffers, int light) {
+        Vec3d top = mast.localPosition().add(new Vec3d(0, 0.6, 0));
+        // север мира (−Z Minecraft) в осях корпуса; угол вокруг оси Y корпуса, на который повернуть ось +X
+        Vec3d north = shipRot.inverseRotate(new Vec3d(0, 0, -1));
+        double rose = Math.atan2(-north.z(), north.x());
+        Vec3d wind = shipRot.inverseRotate(ship.windForRender());
+        boolean calm = Math.hypot(wind.x(), wind.z()) < 0.2;
+        // острие — откуда дует: против вектора воздуха; в штиль петушок смотрит на север
+        double vane = calm ? rose : Math.atan2(wind.z(), -wind.x());
+
+        VertexConsumer brass = buffers.getBuffer(RenderType.entityCutout(materialTexture("brass")));
+        Vec3d roseC = top.add(new Vec3d(0, -0.3, 0));
+        for (int k = 0; k < 4; k++) { // лучи розы: север, запад, юг, восток (против часовой, как угол)
+            Quat q = Quat.fromAxisAngle(Vec3d.UNIT_Y, rose + Math.PI / 2 * k);
+            drawBox(pose, brass, new OrientedBox(roseC.add(q.rotate(new Vec3d(0.2, 0, 0))), new Vec3d(0.2, 0.02, 0.02), q), light, 0xFFFFFFFF);
+            if (k > 0) drawBox(pose, brass, new OrientedBox(roseC.add(q.rotate(new Vec3d(0.43, 0, 0))), new Vec3d(0.04, 0.04, 0.04), q), light, 0xFFFFFFFF);
+        }
+        Quat v = Quat.fromAxisAngle(Vec3d.UNIT_Y, vane);
+        Vec3d a = top.add(new Vec3d(0, 0.06, 0));
+        drawBox(pose, brass, new OrientedBox(a, new Vec3d(0.42, 0.018, 0.018), v), light, 0xFFFFFFFF);                      // стрелка
+        drawBox(pose, brass, new OrientedBox(a.add(v.rotate(new Vec3d(0.44, 0, 0))), new Vec3d(0.06, 0.05, 0.015), v), light, 0xFFFFFFFF); // острие
+        drawBox(pose, brass, new OrientedBox(a.add(v.rotate(new Vec3d(-0.4, 0.04, 0))), new Vec3d(0.05, 0.1, 0.012), v), light, 0xFFFFFFFF); // оперение
+        drawBox(pose, brass, new OrientedBox(a.add(v.rotate(new Vec3d(0, 0.08, 0))), new Vec3d(0.012, 0.06, 0.012), v), light, 0xFFFFFFFF);  // ноги
+        drawBox(pose, brass, new OrientedBox(a.add(v.rotate(new Vec3d(-0.02, 0.2, 0))), new Vec3d(0.15, 0.08, 0.03), v), light, 0xFFFFFFFF); // туловище
+        drawBox(pose, brass, new OrientedBox(a.add(v.rotate(new Vec3d(-0.19, 0.3, 0))), new Vec3d(0.05, 0.15, 0.025), v), light, 0xFFFFFFFF); // хвост
+        drawBox(pose, brass, new OrientedBox(a.add(v.rotate(new Vec3d(0.12, 0.33, 0))), new Vec3d(0.045, 0.08, 0.028), v), light, 0xFFFFFFFF); // шея и голова
+        drawBox(pose, brass, new OrientedBox(a.add(v.rotate(new Vec3d(0.19, 0.36, 0))), new Vec3d(0.03, 0.012, 0.012), v), light, 0xFFFFFFFF); // клюв
+        VertexConsumer red = buffers.getBuffer(RenderType.entityCutout(FALLBACK));
+        drawBox(pose, red, new OrientedBox(a.add(v.rotate(new Vec3d(0.12, 0.43, 0))), new Vec3d(0.04, 0.025, 0.012), v), light, 0xFFC8322A); // гребень
+        Quat n = Quat.fromAxisAngle(Vec3d.UNIT_Y, rose);
+        drawBox(pose, red, new OrientedBox(roseC.add(n.rotate(new Vec3d(0.43, 0, 0))), new Vec3d(0.05, 0.05, 0.05), n), light, 0xFFC8322A); // север
     }
 
     private static Vec3d podCentre(ShipLayout layout, String slot) {
@@ -143,8 +234,8 @@ public class AirshipRenderer extends EntityRenderer<AirshipEntity> {
                 ? ship.rudderForRender(partialTick) : ship.elevatorForRender(partialTick);
         Quat turn = Quat.fromAxisAngle(Vec3d.UNIT_X.cross(s.normal()), Math.toRadians(deg));
         Vec3d centre = c.add(turn.rotate(new Vec3d(-half, 0, 0)));
-        // руль чуть светлее и чуть тоньше — шарнир виден
-        drawBox(pose, vc, new OrientedBox(centre, new Vec3d(half * 0.98, h.y() * 0.96, h.z() * 0.9), turn), light, 0xFFE8DCC0);
+        // руль — то же полотно, чуть тоньше и с зазором у шарнира (без своего оттенка: «странный микс цветов», 11.11.2026)
+        drawBox(pose, vc, new OrientedBox(centre, new Vec3d(half * 0.97, h.y() * 0.96, h.z() * 0.9), turn), light, 0xFFFFFFFF);
     }
 
     /** Трос от носа к голове мачты (AV-038): тонкая коробка вдоль отрезка, в осях корпуса. */
@@ -199,6 +290,7 @@ public class AirshipRenderer extends EntityRenderer<AirshipEntity> {
             if (state.isInstalled(step.slot())) continue;
             boolean ready = state.installed().containsAll(step.requires());
             boolean matches = step.itemKey().equals(held);
+            if (step.optional() && !matches) continue; // место прибора видно только с прибором в руке (D-169)
             double d = AssemblyTargeting.distanceTo(plan, step.slot(), shipPos, rot, new Vec3d(feet.x, feet.y + 1, feet.z));
             int color;
             if (step.slot().equals(targeted)) color = ready ? 0xA060FF60 : 0xA0FF5050;
@@ -265,21 +357,6 @@ public class AirshipRenderer extends EntityRenderer<AirshipEntity> {
         face(pose, vc, c.sub(ay), ax, az, r.rotate(Vec3d.UNIT_Y).negate(), sx, sz, light, argb);        // −Y
         face(pose, vc, c.add(az), ax, ay, r.rotate(Vec3d.UNIT_Z), sx, sy, light, argb);                 // +Z (правый борт)
         face(pose, vc, c.sub(az), ax.negate(), ay, r.rotate(Vec3d.UNIT_Z).negate(), sx, sy, light, argb); // −Z
-    }
-
-    /** Коробка, у которой текстура натянута на каждую грань целиком (0…1), а не повторяется по метрам. */
-    private static void drawBoxFit(PoseStack.Pose pose, VertexConsumer vc, OrientedBox box, int light, int argb) {
-        Vec3d c = box.center(), h = box.halfExtents();
-        Quat r = box.rotation();
-        Vec3d ax = r.rotate(new Vec3d(h.x(), 0, 0));
-        Vec3d ay = r.rotate(new Vec3d(0, h.y(), 0));
-        Vec3d az = r.rotate(new Vec3d(0, 0, h.z()));
-        face(pose, vc, c.add(ax), az.negate(), ay, r.rotate(Vec3d.UNIT_X), 1, 1, light, argb);
-        face(pose, vc, c.sub(ax), az, ay, r.rotate(Vec3d.UNIT_X).negate(), 1, 1, light, argb);
-        face(pose, vc, c.add(ay), ax, az.negate(), r.rotate(Vec3d.UNIT_Y), 1, 1, light, argb);
-        face(pose, vc, c.sub(ay), ax, az, r.rotate(Vec3d.UNIT_Y).negate(), 1, 1, light, argb);
-        face(pose, vc, c.add(az), ax, ay, r.rotate(Vec3d.UNIT_Z), 1, 1, light, argb);
-        face(pose, vc, c.sub(az), ax.negate(), ay, r.rotate(Vec3d.UNIT_Z).negate(), 1, 1, light, argb);
     }
 
     /**

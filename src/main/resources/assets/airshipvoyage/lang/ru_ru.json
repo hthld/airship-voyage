@@ -148,7 +148,7 @@
   "message.airshipvoyage.repair.nothing": "%s: чинить нечего (или мешок горит)",
   "message.airshipvoyage.fire.no_hydrogen": "%s: не горит — поджечь можно только мешок с водородом",
   "item.airshipvoyage.fire_extinguisher": "Огнетушитель «Минимакс»",
-  "item.airshipvoyage.fire_extinguisher.hint": "ПКМ по горящему мешку — потушить (8 зарядов); если горите сами — потушит вас",
+  "item.airshipvoyage.fire_extinguisher.hint": "Держите ПКМ — струя пены (6 м, заряда на 12 с): тушит огонь, горящих мобов и горящие мешки",
   "message.airshipvoyage.fire.out": "%s потушен",
   "key.airshipvoyage.autopilot": "Автопилот вкл/выкл",
   "item.airshipvoyage.fuel_canister": "Канистра бензина",
@@ -179,5 +179,10 @@
   "hud.airshipvoyage.dir_s": "южный",
   "hud.airshipvoyage.dir_sw": "юго-западный",
   "hud.airshipvoyage.dir_w": "западный",
-  "hud.airshipvoyage.dir_nw": "северо-западный"
+  "hud.airshipvoyage.dir_nw": "северо-западный",
+  "item.airshipvoyage.weathervane": "Флюгер с компасной розой",
+  "part.airshipvoyage.weathervane": "флюгер",
+  "item.airshipvoyage.weathervane.hint": "Прибор: ставится на носовое кольцо, показывает ветер у штурвала",
+  "hud.airshipvoyage.wind_no_instrument": "Ветер: нет прибора — поставьте флюгер",
+  "message.airshipvoyage.blueprint.optional": "Приборы (по желанию): %s"
 }

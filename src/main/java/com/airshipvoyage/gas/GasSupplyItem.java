@@ -66,6 +66,12 @@ public final class GasSupplyItem extends Item {
     @Override
     public int getUseDuration(ItemStack stack, LivingEntity entity) { return 72000; }
 
+    /** Отпустил ПКМ или сменил предмет — шланг снят (ревью: соединение оставалось и держало корабль в памяти). */
+    @Override
+    public void onStopUsing(ItemStack stack, LivingEntity entity, int count) {
+        if (!entity.level().isClientSide && entity instanceof Player player) GasSupplyService.disconnect(player);
+    }
+
     /** Запас газа — полоской под значком, как прочность инструмента (видно в инвентаре без подсказки). */
     @Override
     public boolean isBarVisible(ItemStack stack) { return remainingMol(stack) < GasFilling.SUPPLY_MOL - 1e-6; }

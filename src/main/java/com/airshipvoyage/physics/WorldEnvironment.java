@@ -31,6 +31,13 @@ public final class WorldEnvironment implements FlightModel.Environment, FlightMo
     @Override public Atmosphere atmosphere() { return Atmosphere.STANDARD; }
     @Override public FlightModel.ContactQuery contacts() { return this; }
 
+    public Level level() { return level; }
+
+    /** Поле ветра и погода — один раз за тик (запрашиваются десятки раз за тик). */
+    private com.airshipvoyage.core.physics.WindField windField;
+    private long weatherTick = Long.MIN_VALUE;
+    private double weather, intensity;
+
     /**
      * Ветер в проверках (GameTest): null — по умолчанию; на сервере проверок по умолчанию штиль, чтобы старые
      * проверки положения не «сдувало». Тест ветра задаёт его явно и сбрасывает.
@@ -42,10 +49,17 @@ public final class WorldEnvironment implements FlightModel.Environment, FlightMo
     public Vec3d wind(Vec3d p) {
         if (testWind != null) return testWind;
         if (level.isClientSide || level.getServer() instanceof net.minecraft.gametest.framework.GameTestServer) return Vec3d.ZERO;
-        long seed = level instanceof net.minecraft.server.level.ServerLevel sl ? sl.getSeed() : 0;
-        double weather = 1 + 0.5 * level.getRainLevel(1) + 1.0 * level.getThunderLevel(1);
-        return new com.airshipvoyage.core.physics.WindField(seed).wind(p.x(), p.z(), altitudeMeters(p.y()),
-                level.getGameTime() / 20.0, weather, AirshipConfig.WIND_INTENSITY.get());
+        long now = level.getGameTime();
+        if (windField == null) {
+            long seed = level instanceof net.minecraft.server.level.ServerLevel sl ? sl.getSeed() : 0;
+            windField = new com.airshipvoyage.core.physics.WindField(seed);
+        }
+        if (now != weatherTick) {
+            weatherTick = now;
+            weather = 1 + 0.5 * level.getRainLevel(1) + 1.0 * level.getThunderLevel(1);
+            intensity = AirshipConfig.WIND_INTENSITY.get();
+        }
+        return windField.wind(p.x(), p.z(), altitudeMeters(p.y()), now / 20.0, weather, intensity);
     }
 
     // ------------------------------------------------------------------ контакт с блоками

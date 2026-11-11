@@ -18,7 +18,8 @@ public final class ModBlocks {
             BlockBehaviour.Properties.of()
                     .mapColor(MapColor.WOOD)
                     .strength(2.5F)
-                    .sound(SoundType.WOOD));
+                    .sound(SoundType.WOOD)
+                    .noOcclusion()); // не полный куб: под столешницей просвет между ножками
 
     /** Голова причальной мачты (ТЗ 10.2, AV-038). */
     public static final DeferredBlock<com.airshipvoyage.control.MooringMastBlock> MOORING_MAST = BLOCKS.registerBlock(

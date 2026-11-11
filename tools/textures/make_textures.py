@@ -144,6 +144,36 @@ def helm():
     return img
 
 
+def weathervane():
+    """Флюгер: петушок (хвост слева, голова с гребнем справа) на стрелке, мачта, компасная роза с красным севером."""
+    grid = [
+        "..........RR....",
+        "..o......oRRo...",
+        ".oBo.....oBBBY..",
+        ".oBBo....oBBo...",
+        ".oBBBooooBBBo...",
+        "..oBLLLLLBBBo...",
+        "..oBBBBBBBBo....",
+        "...ooBBBBoo.....",
+        ".oo...oIo....oo.",
+        "oBBBBBBIBBBBBBBo",
+        ".oo....I.....oo.",
+        ".......I........",
+        ".RIIIIIIIIIIIIi.",
+        ".......I........",
+        ".......I........",
+        "......III.......",
+    ]
+    pal = {'o': MAT['brass'][0], 'B': MAT['brass'][2], 'L': MAT['brass'][3], 'Y': '#f6e08a',
+           'R': MAT['red'][2], 'I': MAT['iron'][3], 'i': MAT['steel'][3]}
+    img = Image.new('RGBA', (16, 16), (0, 0, 0, 0))
+    for y, row in enumerate(grid):
+        for x, ch in enumerate(row):
+            if ch in pal:
+                img.putpixel((x, y), hex_rgba(pal[ch]))
+    return img
+
+
 def blueprint():
     s = Sprite()
     s.rect('blue', 1, 2, 14, 13)
@@ -343,9 +373,7 @@ def table_side():
     for y in range(10, 16):  # ножки
         for x in (0, 1, 14, 15):
             img.putpixel((x, y), hex_rgba('#2c1a0c' if x in (0, 15) else '#3a2412'))
-    for y in range(11, 16):
-        for x in range(2, 14):
-            img.putpixel((x, y), (0, 0, 0, 0))
+    # строки 10–15 — только ножки (UV [0,10,2,16]); просвет между ними даёт сама модель, а не прозрачность текстуры
     return img
 
 
@@ -432,6 +460,157 @@ def rope():
     return img
 
 
+def ship_ring():
+    """Главное кольцо: тёмный дюраль, треугольная решётка Уоррена между поясами, заклёпки по поясам."""
+    img = Image.new('RGBA', (16, 16), (0, 0, 0, 0))
+    chord, web, shade, rivet = '#8e98a4', '#a9b3be', '#5d6670', '#d6dde4'
+    for y in range(16):
+        for x in range(16):
+            c = None
+            if y <= 1 or y >= 14:
+                c = chord if y in (1, 14) else shade              # пояса
+            elif abs((x % 8) - (y - 2) * 7 / 11) < 0.9 or abs(((x + 4) % 8) - (13 - y) * 7 / 11) < 0.9:
+                c = web                                            # раскосы-треугольники
+            if c:
+                img.putpixel((x, y), hex_rgba(c))
+    for x in (1, 5, 9, 13):
+        img.putpixel((x, 1), hex_rgba(rivet))
+        img.putpixel((x + 2, 14), hex_rgba(rivet))
+    return img
+
+
+def ship_girder():
+    """Продольная ферма: светлый дюраль, X-решётка, заклёпки — отличается от колец светлее и крестом."""
+    img = Image.new('RGBA', (16, 16), (0, 0, 0, 0))
+    chord, web, shade, rivet = '#b4bdc7', '#c9d1d9', '#7d8792', '#eef2f5'
+    for y in range(16):
+        for x in range(16):
+            c = None
+            if y <= 1 or y >= 14:
+                c = chord if y in (1, 14) else shade
+            elif abs(x - y) <= 0 or abs(x - (15 - y)) <= 0:
+                c = web
+            elif abs(x - y) == 1 or abs(x - (15 - y)) == 1:
+                c = shade
+            if c:
+                img.putpixel((x, y), hex_rgba(c))
+    for x in (2, 7, 12):
+        img.putpixel((x, 1), hex_rgba(rivet))
+        img.putpixel((x, 14), hex_rgba(rivet))
+    return img
+
+
+def ship_gas_cell():
+    """Газовый мешок: лоскуты бычьей плёнки (тон чуть разный), швы, поверх — сетка тросов, державшая мешок."""
+    img = Image.new('RGBA', (16, 16))
+    tones = ['#efe3c4', '#e8dab6', '#f3e9cf', '#e4d5ae']
+    for y in range(16):
+        for x in range(16):
+            patch_i = (x // 5 + (y // 4) * 2) % 4
+            c = tones[patch_i]
+            if y % 4 == 0 or (x % 5 == 0 and (y // 4) % 2 == 0) or ((x + 2) % 5 == 0 and (y // 4) % 2 == 1):
+                c = '#d2c29a'                                      # швы лоскутов
+            if (x + y) % 8 == 0 or (x - y) % 8 == 0:
+                c = '#a8936a'                                      # сетка тросов
+            img.putpixel((x, y), hex_rgba(c))
+    return img
+
+
+# Текстуры корпуса кладутся по метрам (16 px на метр — как у блоков) и повторяются, поэтому все они БЕСШОВНЫЕ:
+# без рамок и уголков. Рамка на грани 0,8 × 1,1 м режется не по краю и «съезжает» (замечание владельца 11.11.2026).
+
+def ship_fin():
+    """Оперение: серебристое лакированное полотно, нервюры поперёк (строки) через 4 пикселя — вдоль хорды."""
+    img = Image.new('RGBA', (16, 16))
+    for y in range(16):
+        for x in range(16):
+            c = '#cfd3d6' if (x * 7 + y * 3) % 5 else '#c8ccd0'
+            if y % 4 == 0:
+                c = '#a9aeb3'                                      # нервюры
+            elif y % 4 == 1:
+                c = '#dadee1'                                      # блик за нервюрой
+            img.putpixel((x, y), hex_rgba(c))
+    return img
+
+
+def ship_helm():
+    """Штурвальный пост: вертикальные доски морёного дуба (4 px), швы, волокна; латунь — отдельными уголками."""
+    img = Image.new('RGBA', (16, 16))
+    tones = ['#6b4422', '#62401f', '#6f4824', '#5f3c1d']
+    for y in range(16):
+        for x in range(16):
+            plank = x // 4
+            c = tones[plank]
+            if x % 4 == 3:
+                c = '#3f2712'                                      # шов между досками
+            elif (y * 5 + plank * 7) % 13 == 0 or (y * 5 + plank * 7) % 13 == 1 and x % 4 == 1:
+                c = '#553519'                                      # волокна
+            img.putpixel((x, y), hex_rgba(c))
+    return img
+
+
+def ship_wood():
+    """Лакированное дерево штурвала и винтов: тёплый орех, волокна вдоль строк, без швов."""
+    img = Image.new('RGBA', (16, 16))
+    tones = ['#8a5a2e', '#94632f', '#9c6b36', '#8f5f30']
+    for y in range(16):
+        for x in range(16):
+            c = tones[(y // 2 + (x // 8)) % 4]
+            if y % 3 == 0 and (x + 7 * y) % 16 in (0, 1, 2):
+                c = '#74491f'                                      # волокна — короткие штрихи вдоль строк
+            elif y % 5 == 2 and (x + 3 * y) % 16 in (5, 6):
+                c = '#a97a43'                                      # блик лака
+            img.putpixel((x, y), hex_rgba(c))
+    return img
+
+
+def ship_brass():
+    """Латунь: ступицы, оковка лопастей, уголки поста. Мягкие блики, без рамки."""
+    img = Image.new('RGBA', (16, 16))
+    for y in range(16):
+        for x in range(16):
+            c = MAT['brass'][2]
+            if y % 4 == 0 and (x + y) % 8 < 3:
+                c = MAT['brass'][3]                                # блики
+            elif y % 4 == 2 and (x * 3 + y) % 7 == 0:
+                c = MAT['brass'][1]                                # потёртости
+            img.putpixel((x, y), hex_rgba(c))
+    return img
+
+
+def ship_steel():
+    """Сталь ступиц и осей: ровный серый с редкими бликами."""
+    img = Image.new('RGBA', (16, 16))
+    for y in range(16):
+        for x in range(16):
+            c = MAT['steel'][2] if (x * 5 + y * 3) % 7 else MAT['steel'][1]
+            if (x + 2 * y) % 13 == 0:
+                c = MAT['steel'][3]
+            img.putpixel((x, y), hex_rgba(c))
+    return img
+
+
+def ship_walkway():
+    """Настил киля: еловые доски вдоль корпуса (строки по 4 px), стыки вразбежку, гвозди."""
+    img = Image.new('RGBA', (16, 16))
+    tones = ['#8a6438', '#825d33', '#8f683b', '#7d5a31']
+    for y in range(16):
+        row = y // 4
+        for x in range(16):
+            c = tones[row]
+            if y % 4 == 3:
+                c = '#4f3518'                                      # щель между досками
+            elif (x + row * 5) % 16 == 0:
+                c = '#4f3518'                                      # торцевой стык вразбежку
+            elif (x * 7 + y * 3 + row) % 11 == 0:
+                c = '#6f4e29'                                      # волокна
+            img.putpixel((x, y), hex_rgba(c))
+        for x in range(16):
+            if (x + row * 5) % 16 in (1, 15) and y % 4 == 1:
+                img.putpixel((x, y), hex_rgba('#3a3f47'))          # гвозди у стыка
+    return img
+
+
 def propeller():
     """Лопасть винта: вдоль строк — длина (концы окованы латунью), по столбцам — ширина с затенением кромок."""
     img = Image.new('RGBA', (16, 16), (0, 0, 0, 0))
@@ -454,10 +633,13 @@ ITEMS = {
     'keel_section': keel, 'engine_pod': engine, 'tail_fin': fin, 'folded_gas_cell': gas_cell,
     'hydrogen_supply': lambda: gas_supply('h2'), 'helium_supply': lambda: gas_supply('he'),
     'repair_kit': repair_kit, 'fire_extinguisher': extinguisher, 'fuel_canister': canister,
+    'weathervane': weathervane,
 }
 BLOCKS = {'blueprint_table_top': table_top, 'blueprint_table_side': table_side,
           'mooring_mast_side': mast_side, 'mooring_mast_top': mast_top}
-ENTITY = {'propeller': propeller, 'rope': rope}
+ENTITY = {'propeller': propeller, 'rope': rope, 'ring': ship_ring, 'girder': ship_girder,
+          'gas_cell': ship_gas_cell, 'fin': ship_fin, 'helm': ship_helm, 'wood': ship_wood, 'brass': ship_brass,
+          'steel': ship_steel, 'walkway': ship_walkway}
 
 
 def main():

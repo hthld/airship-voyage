@@ -149,14 +149,12 @@ public final class ShipBreaking {
     }
 
     /**
-     * Тушение (ТЗ 19, D-154): ведро воды или огнетушитель, ПКМ по горящему мешку. Ведро становится пустым,
-     * огнетушитель теряет заряд. Не по горящему — обычное действие предмета.
+     * Тушение (ТЗ 19, D-154): ведро воды, ПКМ по горящему мешку — ведро становится пустым. Не по горящему — обычное
+     * действие предмета. Огнетушитель тушит струёй, пока держишь ПКМ ({@link FireExtinguisherItem}, D-165).
      */
     private static boolean tryExtinguish(Player player, net.minecraft.world.item.ItemStack stack,
                                          net.minecraft.world.InteractionHand hand, double blockDistance) {
-        boolean bucket = stack.is(net.minecraft.world.item.Items.WATER_BUCKET);
-        boolean extinguisher = stack.getItem() instanceof FireExtinguisherItem;
-        if (!bucket && !extinguisher) return false;
+        if (!stack.is(net.minecraft.world.item.Items.WATER_BUCKET)) return false;
         var pick = pick(player.level(), player.getEyePosition(), player.getViewVector(1.0F), player.blockInteractionRange() + 2);
         if (pick.isEmpty() || pick.get().distance() > blockDistance) return false;
         int ci = pick.get().ship().flight().cellIndex(pick.get().slot());
@@ -166,8 +164,7 @@ public final class ShipBreaking {
             player.displayClientMessage(Component.translatable("message.airshipvoyage.fire.out",
                     Component.translatable("part.airshipvoyage." + pick.get().slot())), true);
             if (!player.hasInfiniteMaterials()) {
-                if (bucket) player.setItemInHand(hand, new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.BUCKET));
-                else stack.hurtAndBreak(1, player, net.minecraft.world.entity.LivingEntity.getSlotForHand(hand));
+                player.setItemInHand(hand, new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.BUCKET));
             }
         }
         return true;

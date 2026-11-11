@@ -38,10 +38,17 @@ public final class AssemblyPlan {
      * @param itemKey  предмет, который ставится в эту точку (имя предмета мода без пространства имён)
      * @param stage    этап строительства по ТЗ 5.4 (II — несущая конструкция, IV — газовые камеры)
      * @param requires монтажные точки, которые должны быть уже установлены
+     * @param optional необязательная деталь — прибор или улучшение (ТЗ 5.7, D-169): корабль спускается и летает без
+     *                 неё, поставить можно и на стапеле, и потом на летающий корабль
      */
-    public record Step(String slot, Kind kind, String itemKey, int stage, List<String> requires) {
+    public record Step(String slot, Kind kind, String itemKey, int stage, List<String> requires, boolean optional) {
         public Step {
             requires = List.copyOf(requires);
+        }
+
+        /** Обязательная монтажная точка. */
+        public Step(String slot, Kind kind, String itemKey, int stage, List<String> requires) {
+            this(slot, kind, itemKey, stage, requires, false);
         }
     }
 
@@ -134,11 +141,23 @@ public final class AssemblyPlan {
         return s.kind() == Kind.PART ? parts.get(slot).hullShapes() : List.of(cells.get(slot).bay());
     }
 
-    /** Сколько предметов каждого вида нужно на весь корабль — для сводки стола чертежей (ТЗ, 4.1). */
+    /** Сколько предметов каждого вида нужно на корабль (обязательные детали) — для сводки стола чертежей (ТЗ, 4.1). */
     public Map<String, Integer> billOfMaterials() {
         Map<String, Integer> out = new LinkedHashMap<>();
-        for (Step s : steps) out.merge(s.itemKey(), 1, Integer::sum);
+        for (Step s : steps) if (!s.optional()) out.merge(s.itemKey(), 1, Integer::sum);
         return out;
+    }
+
+    /** Необязательные приборы и улучшения (D-169): предмет → сколько мест. */
+    public Map<String, Integer> optionalMaterials() {
+        Map<String, Integer> out = new LinkedHashMap<>();
+        for (Step s : steps) if (s.optional()) out.merge(s.itemKey(), 1, Integer::sum);
+        return out;
+    }
+
+    /** Сколько обязательных монтажных точек — без них корабль не спустить. */
+    public int requiredCount() {
+        return (int) steps.stream().filter(s -> !s.optional()).count();
     }
 
     /** Число этапов строительства (ТЗ 4.1 — «количество этапов сборки»). */

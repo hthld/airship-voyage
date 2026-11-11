@@ -73,7 +73,10 @@ public final class GasSupplyGameTests {
         var saved = (CompoundTag) stack.save(h.getLevel().registryAccess());
         var copy = ItemStack.parseOptional(h.getLevel().registryAccess(), saved);
         h.assertTrue(GasSupplyItem.remainingMol(copy) == GasSupplyItem.remainingMol(stack), "reserve not saved");
+        h.assertTrue(GasSupplyService.connected(player), "hose not connected while filling");
         player.stopUsingItem();
+        item.onStopUsing(stack, player, 0);
+        h.assertTrue(!GasSupplyService.connected(player), "hose left connected after release");
         double before = cell.amountMol();
         item.onUseTick(h.getLevel(), player, stack, 71979);
         h.assertTrue(cell.amountMol() == before, "supply continued after release");

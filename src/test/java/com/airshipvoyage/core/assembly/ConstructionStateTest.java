@@ -66,6 +66,24 @@ class ConstructionStateTest {
         assertTrue(s.available().isEmpty());
     }
 
+    /**
+     * Приборы необязательны (D-169): без флюгера корабль собран; флюгер ставится на носовое кольцо и в счёт
+     * обязательных не идёт; снимается вместе с кольцом.
+     */
+    @Test
+    void instrumentsAreOptional() {
+        ConstructionState s = fresh();
+        for (var step : s.plan().steps()) if (!step.optional()) s.install(step.slot(), step.itemKey());
+        assertTrue(s.complete());
+        assertEquals(List.of("weathervane"), s.missingOptional());
+        assertEquals(16, s.installedCount());
+        assertTrue(s.check("weathervane", AssemblyPlans.WEATHERVANE).ok());
+        assertTrue(s.install("weathervane", AssemblyPlans.WEATHERVANE).ok());
+        assertTrue(s.complete() && s.missingOptional().isEmpty());
+        assertEquals(16, s.installedCount());
+        assertTrue(s.uninstall("ring_fwd").contains("weathervane"));
+    }
+
     @Test
     void restoreKeepsKnownSlotsOnly() {
         ConstructionState s = ConstructionState.restore(AssemblyPlans.prototype(), List.of("ring_mid", "ring_old", "keel"));

@@ -81,6 +81,7 @@ public final class ShipLayout {
         double[] ax = {-Double.MAX_VALUE, -Double.MAX_VALUE, -Double.MAX_VALUE};
         for (PartInstance p : this.parts) {
             if (this.controlSurfaces.stream().anyMatch(c -> c.slot().equals(p.slot()))) continue;
+            if (p.type().massKg() <= 0) continue; // приборы без массы (флюгер, D-169) — не корпус
             for (OrientedBox b : p.hullShapes()) {
                 Vec3d lo = b.aabbMin(), hi = b.aabbMax();
                 for (int a = 0; a < 3; a++) {

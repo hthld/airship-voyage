@@ -26,6 +26,7 @@ public final class ModCreativeTabs {
                         output.accept(ModItems.ENGINE_POD.get());
                         output.accept(ModItems.TAIL_FIN.get());
                         output.accept(ModItems.HELM.get());
+                        output.accept(ModItems.WEATHERVANE.get());
                         output.accept(ModItems.HYDROGEN_SUPPLY.get());
                         output.accept(ModItems.HELIUM_SUPPLY.get());
                         output.accept(ModItems.REPAIR_KIT.get());

@@ -71,18 +71,29 @@ public final class PrototypeShip {
      * обтянутая тканью, ≈ 2 кг/м² — 18 кг. Крепится к боковой стойке кормового кольца, торчит за борт.
      */
     public static final PartType HORIZONTAL_FIN = new PartType("horizontal_fin", 18,
-            List.of(box(0, 0, 0, 3.0, 0.2, 3.0)), "gas_cell", false);
+            List.of(box(0, 0, 0, 3.0, 0.2, 3.0)), "fin", false);
 
     /** Вертикальный стабилизатор с рулём направления: 3 × 2 м над верхней поперечиной кормового кольца, 12 кг. */
     public static final PartType VERTICAL_FIN = new PartType("vertical_fin", 12,
-            List.of(box(0, 0, 0, 3.0, 2.0, 0.2)), "gas_cell", false);
+            List.of(box(0, 0, 0, 3.0, 2.0, 0.2)), "fin", false);
 
     /**
      * Штурвальный пост (ТЗ 9.1–9.2): тумба с штурвалом, телеграфом и рукоятками балласта и газа на носовом конце
      * настила киля — там проход всё равно кончается. 0,6 × 1,1 × 0,8 м, 30 кг.
      */
     public static final PartType HELM = new PartType("helm", 30,
-            List.of(box(0, 0, 0, 0.6, 1.1, 0.8)), "engine", false);
+            List.of(box(0, 0, 0, 0.6, 1.1, 0.8)), "helm", false);
+
+    /**
+     * Флюгер с компасной розой (D-169) — первый необязательный прибор: медная мачта 1,2 м на верхней поперечине
+     * носового кольца (её верх y = 6), наверху петушок со стрелкой. Коллизия — только мачта; петушок и роза — рисунок.
+     * Масса — несколько килограммов на три тонны корабля, в модели 0 (не меняет ни центровку, ни сопротивление).
+     */
+    public static final PartType WEATHERVANE = new PartType("weathervane", 0,
+            List.of(box(0, 0, 0, 0.1, 1.2, 0.1)), "steel", false);
+
+    /** Центр мачты флюгера: над серединой верхней поперечины носового кольца. */
+    public static final Vec3d WEATHERVANE_POS = new Vec3d(10, RING_SIZE / 2 + 0.6, 0);
 
     /** Центр штурвального поста (локальные координаты): на настиле (верх −5,25), у носового кольца. */
     public static final Vec3d HELM_POS = new Vec3d(9.6, DECK_TOP + 0.55, 0);
@@ -113,7 +124,8 @@ public final class PrototypeShip {
                     new PartInstance("fin_top", VERTICAL_FIN, new Vec3d(FIN_X, 7.0, 0), Quat.IDENTITY),
                     new PartInstance("fin_port", HORIZONTAL_FIN, new Vec3d(FIN_X, 0, -7.5), Quat.IDENTITY),
                     new PartInstance("fin_stbd", HORIZONTAL_FIN, new Vec3d(FIN_X, 0, 7.5), Quat.IDENTITY),
-                    new PartInstance("helm", HELM, HELM_POS, Quat.IDENTITY)),
+                    new PartInstance("helm", HELM, HELM_POS, Quat.IDENTITY),
+                    new PartInstance("weathervane", WEATHERVANE, WEATHERVANE_POS, Quat.IDENTITY)),
             List.of(cell("cell_aft", -5.0), cell("cell_fwd", 5.0)),
             List.of(engine("engine_port", -ENGINE_Z), engine("engine_stbd", ENGINE_Z)),
             List.of(new ControlSurface("fin_top", ControlSurface.Kind.RUDDER, new Vec3d(FIN_X, 7.0, 0), Vec3d.UNIT_Z, 6.0),

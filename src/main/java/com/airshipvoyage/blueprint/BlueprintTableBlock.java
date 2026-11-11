@@ -28,8 +28,20 @@ import java.util.Map;
  * Окно выбора появится вместе со второй моделью.
  */
 public class BlueprintTableBlock extends Block {
+    /** Форма по модели: столешница, тумба и четыре ножки — между ножками можно заглянуть и пропустить предмет. */
+    private static final net.minecraft.world.phys.shapes.VoxelShape SHAPE = net.minecraft.world.phys.shapes.Shapes.or(
+            Block.box(0, 12, 0, 16, 16, 16), Block.box(1, 6, 1, 15, 12, 15),
+            Block.box(1, 0, 1, 3, 6, 3), Block.box(13, 0, 1, 15, 6, 3),
+            Block.box(1, 0, 13, 3, 6, 15), Block.box(13, 0, 13, 15, 6, 15));
+
     public BlueprintTableBlock(Properties properties) {
         super(properties);
+    }
+
+    @Override
+    protected net.minecraft.world.phys.shapes.VoxelShape getShape(BlockState state, net.minecraft.world.level.BlockGetter level,
+                                                                  BlockPos pos, net.minecraft.world.phys.shapes.CollisionContext ctx) {
+        return SHAPE;
     }
 
     @Override
@@ -53,7 +65,7 @@ public class BlueprintTableBlock extends Block {
         player.sendSystemMessage(Component.translatable("message.airshipvoyage.blueprint.title",
                 Component.translatable("blueprint.airshipvoyage." + plan.layout().id())).withStyle(ChatFormatting.GOLD));
         player.sendSystemMessage(Component.translatable("message.airshipvoyage.blueprint.size",
-                fmt(size.x()), fmt(size.z()), fmt(size.y()), plan.steps().size(), plan.stageCount()));
+                fmt(size.x()), fmt(size.z()), fmt(size.y()), plan.requiredCount(), plan.stageCount()));
         var materials = Component.empty();
         boolean first = true;
         for (Map.Entry<String, Integer> e : plan.billOfMaterials().entrySet()) {
@@ -62,6 +74,17 @@ public class BlueprintTableBlock extends Block {
             materials.append(Component.translatable("item.airshipvoyage." + e.getKey())).append(" ×" + e.getValue());
         }
         player.sendSystemMessage(Component.translatable("message.airshipvoyage.blueprint.materials", materials));
+        if (!plan.optionalMaterials().isEmpty()) { // приборы — по желанию (D-169)
+            var extra = Component.empty();
+            first = true;
+            for (Map.Entry<String, Integer> e : plan.optionalMaterials().entrySet()) {
+                if (!first) extra.append(", ");
+                first = false;
+                extra.append(Component.translatable("item.airshipvoyage." + e.getKey()));
+            }
+            player.sendSystemMessage(Component.translatable("message.airshipvoyage.blueprint.optional", extra)
+                    .withStyle(ChatFormatting.AQUA));
+        }
         player.sendSystemMessage(Component.translatable("message.airshipvoyage.blueprint.howto").withStyle(ChatFormatting.GRAY));
     }
 

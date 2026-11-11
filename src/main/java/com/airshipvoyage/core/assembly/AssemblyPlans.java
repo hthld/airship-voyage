@@ -23,6 +23,7 @@ public final class AssemblyPlans {
     public static final String ENGINE = "engine_pod";
     public static final String FIN = "tail_fin";
     public static final String HELM = "helm";
+    public static final String WEATHERVANE = "weathervane";
 
     /** Этапы по ТЗ 5.4. */
     public static final int STAGE_STRUCTURE = 2, STAGE_GAS_CELLS = 4, STAGE_EQUIPMENT = 5;
@@ -54,7 +55,9 @@ public final class AssemblyPlans {
             new Step("fin_port", Kind.PART, FIN, STAGE_EQUIPMENT, List.of("ring_aft")),
             new Step("fin_stbd", Kind.PART, FIN, STAGE_EQUIPMENT, List.of("ring_aft")),
             // этап V: штурвальный пост стоит на настиле киля
-            new Step("helm", Kind.PART, HELM, STAGE_EQUIPMENT, List.of("keel"))));
+            new Step("helm", Kind.PART, HELM, STAGE_EQUIPMENT, List.of("keel")),
+            // необязательный прибор (D-169): флюгер с компасной розой на верхней поперечине носового кольца
+            new Step("weathervane", Kind.PART, WEATHERVANE, STAGE_EQUIPMENT, List.of("ring_fwd"), true)));
 
     private static final Map<String, AssemblyPlan> BY_LAYOUT = Map.of(PrototypeShip.LAYOUT_ID, PROTOTYPE);
 

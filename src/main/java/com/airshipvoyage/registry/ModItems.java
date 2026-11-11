@@ -24,7 +24,8 @@ public final class ModItems {
             com.airshipvoyage.damage.RepairKitItem::new, new Item.Properties().stacksTo(16));
 
     public static final DeferredItem<com.airshipvoyage.damage.FireExtinguisherItem> FIRE_EXTINGUISHER = ITEMS.registerItem(
-            "fire_extinguisher", com.airshipvoyage.damage.FireExtinguisherItem::new, new Item.Properties().durability(8));
+            "fire_extinguisher", com.airshipvoyage.damage.FireExtinguisherItem::new,
+            new Item.Properties().durability(com.airshipvoyage.damage.FireExtinguisherItem.CHARGE_TICKS));
 
     public static final DeferredItem<com.airshipvoyage.control.FuelCanisterItem> FUEL_CANISTER = ITEMS.registerItem(
             "fuel_canister", com.airshipvoyage.control.FuelCanisterItem::new, new Item.Properties().stacksTo(1));
@@ -56,6 +57,10 @@ public final class ModItems {
 
     public static final DeferredItem<ShipPartItem> HELM = ITEMS.registerItem(AssemblyPlans.HELM,
             p -> new ShipPartItem(AssemblyPlans.HELM, p), new Item.Properties().stacksTo(1));
+
+    /** Флюгер — первый необязательный прибор (D-169). */
+    public static final DeferredItem<ShipPartItem> WEATHERVANE = ITEMS.registerItem(AssemblyPlans.WEATHERVANE,
+            p -> new ShipPartItem(AssemblyPlans.WEATHERVANE, p), new Item.Properties().stacksTo(1));
 
     public static final DeferredItem<ShipPartItem> FOLDED_GAS_CELL = ITEMS.registerItem(AssemblyPlans.CELL,
             p -> new ShipPartItem(AssemblyPlans.CELL, p), new Item.Properties().stacksTo(1));

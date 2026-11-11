@@ -197,6 +197,10 @@ public final class FlightModel {
         if (derived.cells().size() != layout.cells().size()) throw new IllegalArgumentException("cells must stay the same");
         layout = derived;
         engines.removeIf(e -> derived.engines().stream().noneMatch(m -> m.slot().equals(e.id())));
+        // гондола поставлена заново (ремонт) — её мотор снова есть: стоп, полный бак (найдено при проходе по AV-033)
+        for (EngineMount m : derived.engines()) {
+            if (engines.stream().noneMatch(e -> e.id().equals(m.slot()))) engines.add(new Engine(m));
+        }
         updateAero();
         entryNormals = new Vec3d[0];
         faceEntries.clear();

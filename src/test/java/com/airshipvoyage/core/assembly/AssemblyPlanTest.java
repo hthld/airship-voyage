@@ -17,8 +17,11 @@ class AssemblyPlanTest {
 
     @Test
     void prototypePlanCoversEveryPartAndCell() {
-        // 3 кольца + киль + 4 продольные фермы + 2 камеры + 2 моторные гондолы + 3 стабилизатора + пост
-        assertEquals(16, plan.steps().size());
+        // 3 кольца + киль + 4 продольные фермы + 2 камеры + 2 моторные гондолы + 3 стабилизатора + пост; + флюгер
+        assertEquals(17, plan.steps().size());
+        assertEquals(16, plan.requiredCount());
+        assertTrue(plan.step("weathervane").optional());
+        assertEquals(Map.of(AssemblyPlans.WEATHERVANE, 1), plan.optionalMaterials());
         assertEquals(Map.of(AssemblyPlans.RING, 3, AssemblyPlans.KEEL, 1, AssemblyPlans.GIRDER, 4, AssemblyPlans.CELL, 2, AssemblyPlans.ENGINE, 2, AssemblyPlans.FIN, 3, AssemblyPlans.HELM, 1),
                 plan.billOfMaterials());
         assertEquals(3, plan.stageCount()); // этапы II, IV и V по ТЗ 5.4

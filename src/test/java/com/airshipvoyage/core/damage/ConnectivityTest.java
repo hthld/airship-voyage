@@ -39,7 +39,7 @@ class ConnectivityTest {
         assertEquals(2, noKeel.size());
         assertEquals(Set.of("helm"), noKeel.get(1));
         var noRings = without("ring_aft", "ring_mid", "ring_fwd");
-        assertEquals(10, noRings.size());
+        assertEquals(11, noRings.size()); // флюгер (D-169) держался на носовом кольце — отдельный кусок
         assertEquals(Set.of("keel", "helm"), noRings.get(0));
     }
 }

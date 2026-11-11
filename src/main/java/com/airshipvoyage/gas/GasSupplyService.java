@@ -15,6 +15,7 @@ import java.util.Locale;
 import java.util.Optional;
 
 /** Сервер заново проверяет досягаемость и свободный доступ каждый тик (ТЗ 7.3, 22.8). */
+@net.neoforged.fml.common.EventBusSubscriber(modid = com.airshipvoyage.AirshipVoyage.MOD_ID)
 public final class GasSupplyService {
     public record Target(AirshipEntity ship, int cell, double distance) {}
 
@@ -31,6 +32,14 @@ public final class GasSupplyService {
     static void connect(Player player, Target target) { HOSES.put(player.getUUID(), target); }
 
     static void disconnect(Player player) { HOSES.remove(player.getUUID()); }
+
+    /** Подключён ли у игрока шланг (для проверок). */
+    public static boolean connected(Player player) { return HOSES.containsKey(player.getUUID()); }
+
+    @net.neoforged.bus.api.SubscribeEvent
+    public static void onLogout(net.neoforged.neoforge.event.entity.player.PlayerEvent.PlayerLoggedOutEvent event) {
+        HOSES.remove(event.getEntity().getUUID());
+    }
 
     /** Подключённый штуцер ещё досягаем: корабль на месте, камера стоит, расстояние и блоки в порядке. */
     static Optional<Target> stillConnected(Player player, Target t) {
@@ -94,6 +103,7 @@ public final class GasSupplyService {
         if (player.level().isClientSide || !player.isAlive() || player.isSpectator()
                 || !player.isUsingItem() || player.getUseItem() != stack || stack.getItem() != item) return;
         Target hose = HOSES.get(player.getUUID());
+        if (hose != null && hose.ship().isRemoved()) hose = null;
         var target = hose != null ? stillConnected(player, hose) : findTarget(player);
         if (target.isEmpty()) {
             disconnect(player);

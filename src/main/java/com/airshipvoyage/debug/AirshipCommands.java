@@ -310,7 +310,7 @@ public final class AirshipCommands {
     private static int repair(CommandContext<CommandSourceStack> c, String cellId) throws CommandSyntaxException {
         AirshipEntity ship = nearestWithCells(c.getSource());
         if (cellId == null) {
-            for (var cell : ship.flight().cells()) cell.setLeakPerSecond(0);
+            ship.repairAll(); // всё: детали, мешки, огонь, утечки, баки
         } else {
             ship.flight().cells().get(cellIndex(ship, cellId)).setLeakPerSecond(0);
         }

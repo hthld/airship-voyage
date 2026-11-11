@@ -74,7 +74,7 @@ public final class ConstructionState {
         return c;
     }
 
-    /** Отладка: поставить всё, что ещё не стоит (команда {@code /airship build complete}). */
+    /** Отладка: поставить всё, что ещё не стоит, вместе с приборами (команда {@code /airship build complete}). */
     public void installAll() {
         for (AssemblyPlan.Step s : plan.steps()) installed.add(s.slot());
     }
@@ -103,16 +103,33 @@ public final class ConstructionState {
         return out;
     }
     public Set<String> installed() { return Collections.unmodifiableSet(installed); }
-    public int installedCount() { return installed.size(); }
-    public int totalCount() { return plan.steps().size(); }
-    public boolean complete() { return installed.size() == plan.steps().size(); }
 
-    /** Точки, которые можно ставить прямо сейчас (опоры готовы). */
+    /** Установлено обязательных точек (приборы — D-169 — не в счёт). */
+    public int installedCount() {
+        int n = 0;
+        for (AssemblyPlan.Step s : plan.steps()) if (!s.optional() && installed.contains(s.slot())) n++;
+        return n;
+    }
+
+    /** Обязательных точек в плане. */
+    public int totalCount() { return plan.requiredCount(); }
+
+    /** Всё обязательное стоит — можно спускать; приборы ставятся по желанию. */
+    public boolean complete() { return installedCount() == totalCount(); }
+
+    /** Обязательные точки, которые можно ставить прямо сейчас (опоры готовы). */
     public List<AssemblyPlan.Step> available() {
         List<AssemblyPlan.Step> out = new ArrayList<>();
         for (AssemblyPlan.Step s : plan.steps()) {
-            if (!installed.contains(s.slot()) && installed.containsAll(s.requires())) out.add(s);
+            if (!s.optional() && !installed.contains(s.slot()) && installed.containsAll(s.requires())) out.add(s);
         }
+        return out;
+    }
+
+    /** Необязательные приборы, которые ещё не стоят (D-169). */
+    public List<String> missingOptional() {
+        List<String> out = new ArrayList<>();
+        for (AssemblyPlan.Step s : plan.steps()) if (s.optional() && !installed.contains(s.slot())) out.add(s.slot());
         return out;
     }
 

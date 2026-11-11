@@ -247,7 +247,9 @@ public final class HelmClient {
         cy += 11;
         // ветер: откуда дует по компасу и куда бьёт относительно корабля
         double wx = t.getFloat("wx"), wz = t.getFloat("wz"), ws = Math.hypot(wx, wz);
-        if (ws < 0.2) {
+        if (!t.getBoolean("vane")) { // ветер показывает прибор — флюгер (D-169); без него — только подсказка
+            g.drawString(font, Component.translatable("hud.airshipvoyage.wind_no_instrument").getString(), cx, cy, DIM);
+        } else if (ws < 0.2) {
             g.drawString(font, Component.translatable("hud.airshipvoyage.calm").getString(), cx, cy, DIM);
         } else {
             double from = Math.toDegrees(Math.atan2(-wx, wz));          // пеленг «откуда»: 0 — север, 90 — восток

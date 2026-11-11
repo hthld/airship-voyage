@@ -98,7 +98,9 @@ public final class AirshipNetwork {
         AirshipEntity ship = ship(ctx, p.ship());
         if (ship == null) return;
         int trim = (p.has(HelmInput.TRIM_UP) ? 1 : 0) - (p.has(HelmInput.TRIM_DOWN) ? 1 : 0);
-        if (p.has(HelmInput.AUTOPILOT) && ship.isHelmsman(ctx.player())) HelmService.toggleAutopilot(ship);
+        if (p.has(HelmInput.AUTOPILOT) && ship.isHelmsman(ctx.player()) && HelmService.nearHelm(ctx.player(), ship)) {
+            HelmService.toggleAutopilot(ship);
+        }
         HelmService.apply(ctx.player(), ship, Integer.signum(p.telegraphStep()), p.rudder(), p.elevator(),
                 p.has(HelmInput.VENT), p.has(HelmInput.DROP), trim, p.has(HelmInput.STOP), p.has(HelmInput.AUTO_TRIM));
     }

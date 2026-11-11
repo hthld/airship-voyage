@@ -50,5 +50,8 @@ public class ShipPartItem extends Item {
     @Override
     public void appendHoverText(ItemStack stack, TooltipContext context, List<Component> tooltip, TooltipFlag flag) {
         tooltip.add(Component.translatable("item.airshipvoyage.ship_part.hint").withStyle(ChatFormatting.GRAY));
+        boolean optional = com.airshipvoyage.core.assembly.AssemblyPlans.prototype().steps().stream()
+                .anyMatch(s -> s.optional() && s.itemKey().equals(partKey()));
+        if (optional) tooltip.add(Component.translatable("item.airshipvoyage." + partKey() + ".hint").withStyle(ChatFormatting.AQUA));
     }
 }

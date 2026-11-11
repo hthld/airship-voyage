@@ -24,20 +24,30 @@ ID постоянные и не переиспользуются: `AV-NNN` — �
 | AV-010 | Проверка владельцем шагов 2–4 в игре (из сессии 1) | waiting | результат в записях не зафиксирован |
 | AV-015 | Заправка отдельных камер без команды: баллоны, расход, клапаны и сохранение газа при спуске (ТЗ 7.3, этап IX) | done | `3282f39`; ревью Claude AUD-04 (шланг, клапаны поста); ARCH 17, D-125/126/127/128; инфраструктура — AV-024; в клиенте не проверено |
 | AV-017 | Корабль и выгрузка чанков: тикеты с экипажем, пауза над незагруженной землёй, реестр `ShipRecords`, `/airship list` (ТЗ 22.9) | done | `3282f39`; D-129; ARCH 18; тест `crewMakesShipHoldItsChunksAndRemovalReleasesThem`; в игре не проверено |
-| AV-036 | Топливо: баки в гондолах, расход, канистра (ТЗ 8.4) | done | не закоммичено; D-157; `OperationsTest`, `canisterRefuelsAndStateSurvivesSave` |
-| AV-037 | Автопилот: курс и высота (ТЗ 9.3) | done | не закоммичено; D-158; `OperationsTest` (4), `autopilotFromTheHelm` |
-| AV-038 | Причальная мачта, трос, лебёдка (ТЗ 10.2) | done | не закоммичено; D-159; `mooringRopeHoldsAndWinchPullsNoseToMast`, `mooringMastHoldsTheShip` |
-| AV-039 | Ветер (ТЗ 8.6): снос, разворот на мачте, приборы | done | не закоммичено; D-160; `WindTest`, `windDriftsTheShip`; удержание скорости автопилотом и обрыв троса — AV-041 |
-| AV-040 | Удары о землю ломают детали (ТЗ 18, 20) | done | не закоммичено; D-161; `groundImpactsAreReportedPerPart`, `hardLandingBreaksLowerParts` |
+| AV-036 | Топливо: баки в гондолах, расход, канистра (ТЗ 8.4) | done | `a0559f6`; D-157; `OperationsTest`, `canisterRefuelsAndStateSurvivesSave` |
+| AV-037 | Автопилот: курс и высота (ТЗ 9.3) | done | `a0559f6`; D-158; `OperationsTest` (4), `autopilotFromTheHelm` |
+| AV-038 | Причальная мачта, трос, лебёдка (ТЗ 10.2) | done | `a0559f6`; D-159; `mooringRopeHoldsAndWinchPullsNoseToMast`, `mooringMastHoldsTheShip` |
+| AV-039 | Ветер (ТЗ 8.6): снос, разворот на мачте, приборы | done | `a0559f6`; D-160; `WindTest`, `windDriftsTheShip`; удержание скорости автопилотом и обрыв троса — AV-041 |
+| AV-040 | Удары о землю ломают детали (ТЗ 18, 20) | done | `a0559f6`; D-161; `groundImpactsAreReportedPerPart`, `hardLandingBreaksLowerParts` |
 | AV-041 | Удержание скорости автопилотом, обрыв троса при сильном ветре, вертикальные потоки | backlog | продолжение AV-039 |
-| AV-035 | Замечания владельца 5: ходьба «как на шифте», пролёт сквозь, коллизия мешков, урон от взрыва и огонь, тушение, стрелы, посадка на сущность | done | не закоммичено; D-151…D-156; ARCH 23; 5 новых игровых тестов; в игре не проверено |
-| AV-033 | Ремонт: сломанное — заново своим предметом, ремкомплект, обломки в любом режиме, винты (текстура, сломанные гондолы), поджог огнивом | done | не закоммичено; D-147, D-148, D-150; ARCH 22; `brokenPartsAndCellsCanBeRepaired`, `flintAndSteelIgnitesHydrogenCell`; в игре не проверено |
-| AV-034 | Рецепты всех предметов мода (выживание, JEI) | done | не закоммичено; D-149; `allItemsHaveRecipes`; в игре не проверено |
-| AV-030 | Поломка корабля: удары рукой, взрывы (обломки разлетаются), пожар водорода, разборка на стапеле | done | не закоммичено; D-142…D-145; ARCH 21; `HullDamageTest`, `DamageGameTests` (5); в игре не проверено |
-| AV-031 | Жалобы владельца 3: снос при взлёте, вес людей без наклона, красивая панель приборов, NeoForge для JEI | done | не закоммичено; D-141, D-146; `peopleAddWeightWithoutTiltingTheShip`, `autoTrimCountersForwardLeak`; профиль лаунчера переключает владелец; в игре не проверено |
-| AV-032 | Корабль раскалывается на части-обломки (сущности) | done | не закоммичено; D-162; ARCH 26; `ConnectivityTest`, `brokenRingDropsEnginesAsWrecks` |
+| AV-035 | Замечания владельца 5: ходьба «как на шифте», пролёт сквозь, коллизия мешков, урон от взрыва и огонь, тушение, стрелы, посадка на сущность | done | `a0559f6`; D-151…D-156; ARCH 23; 5 новых игровых тестов; в игре не проверено |
+| AV-033 | Ремонт: сломанное — заново своим предметом, ремкомплект, обломки в любом режиме, винты (текстура, сломанные гондолы), поджог огнивом | done | `a0559f6`; D-147, D-148, D-150; ARCH 22; `brokenPartsAndCellsCanBeRepaired`, `flintAndSteelIgnitesHydrogenCell`; в игре не проверено |
+| AV-034 | Рецепты всех предметов мода (выживание, JEI) | done | `a0559f6`; D-149; `allItemsHaveRecipes`; в игре не проверено |
+| AV-030 | Поломка корабля: удары рукой, взрывы (обломки разлетаются), пожар водорода, разборка на стапеле | done | `a0559f6`; D-142…D-145; ARCH 21; `HullDamageTest`, `DamageGameTests` (5); в игре не проверено |
+| AV-031 | Жалобы владельца 3: снос при взлёте, вес людей без наклона, красивая панель приборов, NeoForge для JEI | done | `a0559f6`; D-141, D-146; `peopleAddWeightWithoutTiltingTheShip`, `autoTrimCountersForwardLeak`; профиль лаунчера переключает владелец; в игре не проверено |
+| AV-032 | Корабль раскалывается на части-обломки (сущности) | done | `a0559f6`; D-162; ARCH 26; `ConnectivityTest`, `brokenRingDropsEnginesAsWrecks` |
+| AV-043 | Мобы на корабле: не сходят за борт, гуляют по палубе | done | не закоммичено; D-163; `mobsStayAboardAndWalkAround` |
+| AV-044 | Проход по сделанному: ресурсы, ремонт мотора гондолы, полный `/airship repair`, кэш форм | done | не закоммичено; ARCH 27 |
+| AV-052 | Идея в ТЗ: обязательная часть и приборы (ТЗ 5.7, 8.6, 9.4) | done | не закоммичено; D-169 |
+| AV-051 | Флюгер с компасной розой — первый необязательный прибор; строка ветра у штурвала только с ним | done | не закоммичено; ARCH 29; D-169 |
+| AV-050 | Выдавливание не «батут»: урон и выброс только при посадке сверху | done | не закоммичено; ARCH 29; D-168 |
+| AV-049 | Штурвал и винты в «блочном» стиле, бесшовные текстуры корпуса, руль без оттенка | done | не закоммичено; ARCH 29; D-167 |
+| AV-048 | Ветер: режимы дважды в сутки, плавная смена | done | не закоммичено; ARCH 29; D-166 |
+| AV-047 | Огнетушитель распыляет струю и тушит, что задевает | done | не закоммичено; ARCH 29; D-165 |
+| AV-046 | Стол чертежей: модель с ножками и просветами | done | не закоммичено; ARCH 29 |
+| AV-045 | Ревью всего кода (8 находок) и вид корпуса: текстуры, штурвал | done | не закоммичено; ARCH 28; D-164 |
 | AV-042 | Прочность соединений (стыки рвутся от нагрузки), оседание остова, взрывы на стапеле | backlog | продолжение AV-032 |
-| AV-029 | Жалобы владельца 2: управляемость, чувствительность к весу, понятный телеграф и обороты винтов, винты сзади, понятный газ | done | не закоммичено; D-136…D-140; ARCH 20; тесты `differentialThrustTurnsShipOnTheSpot`, `autoTrimLevelsShipAndSwayDiesOut`, `pressureHeightIsWhereGasFillsTheCells`, `autoTrimLevelsShipWithPeopleAtTheBow`, пульт в `helmTakesCommandsAndReleases`; в игре не проверено |
+| AV-029 | Жалобы владельца 2: управляемость, чувствительность к весу, понятный телеграф и обороты винтов, винты сзади, понятный газ | done | `a0559f6`; D-136…D-140; ARCH 20; тесты `differentialThrustTurnsShipOnTheSpot`, `autoTrimLevelsShipAndSwayDiesOut`, `pressureHeightIsWhereGasFillsTheCells`, `autoTrimLevelsShipWithPeopleAtTheBow`, пульт в `helmTakesCommandsAndReleases`; в игре не проверено |
 | AV-027 | Дифферент перекачкой балласта со штурвала, дифферент и балласт на приборах | done | `3282f39`; D-134; ARCH 19; тесты `ballastTransferMovesCentreOfMassAndConservesMass`, `trimmingBallastLevelsShipWithHelmsmanAtTheBow`, насос в `helmTakesCommandsAndReleases`; в игре не проверено |
 | AV-028 | Жалоба владельца: слабый поворот, рули не видно, корабль тянет в сторону | done | `3282f39`; D-132, D-133, D-135; тесты `rudderTurnsShipUnderWay` (3,2°/с), `personOffCentreDoesNotPullShipAside`; в игре не проверено |
 | AV-026 | Значки всех предметов мода в стиле Minecraft 16×16 | done | `3282f39`; `tools/textures/make_textures.py`; D-130; в игре не проверено |

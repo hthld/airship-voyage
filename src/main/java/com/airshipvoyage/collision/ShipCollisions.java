@@ -68,8 +68,52 @@ public final class ShipCollisions {
                 new Vec3d(movement.x, movement.y, movement.z), shipShapes(ships), blocksOf(entity, box),
                 step, entity.onGround());
         if (r.landedOn() >= 0) markLanded(entity, ships.get(r.landedOn()));
-        if (!r.changed()) return movement;
-        return new Vec3(r.movement().x(), r.movement().y(), r.movement().z());
+        Vec3 out = r.changed() ? new Vec3(r.movement().x(), r.movement().y(), r.movement().z()) : movement;
+        return keepMobsAboard(entity, out);
+    }
+
+    /** Насколько глубоко под ногами ищется опора для шага моба по кораблю, м (шаг вниз на блок — можно). */
+    public static final double MOB_SUPPORT_DEPTH = 1.1;
+
+    /**
+     * Мобы на корабле не сходят за борт (AV-043). Их поиск пути видит только блоки мира, а палубы для него нет, и
+     * моб шёл с палубы прямо в пустоту (жители и куры падали с висящего корабля через 6–15 с). Моб, стоящий на
+     * корабле, не делает шаг туда, где под ногами (до {@value #MOB_SUPPORT_DEPTH} м) нет ни детали, ни блока, — как
+     * игрок с Shift. Отброс от удара и взрыва не ограничивается (hurtTime), летающие и плавающие — тоже.
+     */
+    private static Vec3 keepMobsAboard(Entity entity, Vec3 move) {
+        if (!(entity instanceof net.minecraft.world.entity.Mob mob) || entity.level().isClientSide) return move;
+        if (mob.isNoGravity() || mob.isInWater() || mob.isPassenger() || knockedBack(mob)) return move;
+        Contact c = CONTACTS.get(entity);
+        // и в прыжке: мобы подпрыгивают на стойках колец, и в воздухе их сносило за борт (найдено тестом)
+        if (c == null || entity.level().getGameTime() - c.lastLandedTick > MOB_JUMP_GRACE_TICKS) return move;
+        double dx = move.x, dz = move.z;
+        if (dx == 0 && dz == 0) return move;
+        AABB bb = entity.getBoundingBox();
+        double depth = MOB_SUPPORT_DEPTH + (mob.onGround() ? 0 : 1.0);
+        if (!hasFooting(entity, bb.move(dx, 0, dz), depth)) {
+            if (hasFooting(entity, bb.move(dx, 0, 0), depth)) dz = 0;
+            else if (hasFooting(entity, bb.move(0, 0, dz), depth)) dx = 0;
+            else { dx = 0; dz = 0; }
+        }
+        return dx == move.x && dz == move.z ? move : new Vec3(dx, move.y, dz);
+    }
+
+    /** Сколько тиков после касания палубы моб в прыжке ещё удерживается от схода за борт. */
+    public static final int MOB_JUMP_GRACE_TICKS = 15;
+
+    /** Настоящий отброс — удар существа или взрыв (горение, голод, падение — не отброс). */
+    private static boolean knockedBack(net.minecraft.world.entity.Mob mob) {
+        if (mob.hurtTime <= 0) return false;
+        var src = mob.getLastDamageSource();
+        return src != null && (src.getEntity() != null || src.is(net.minecraft.tags.DamageTypeTags.IS_EXPLOSION));
+    }
+
+    /** Есть ли опора под коробкой {@code bb}: деталь корабля или блок в пределах {@code depth} м вниз. */
+    private static boolean hasFooting(Entity entity, AABB bb, double depth) {
+        AABB probe = new AABB(bb.minX, bb.minY - depth, bb.minZ, bb.maxX, bb.minY + 1e-3, bb.maxZ);
+        if (!entity.level().noCollision(entity, probe)) return true;
+        return supports(entity, probe);
     }
 
     /** Блоки мира (и твёрдые сущности вроде лодок) с ванильной обрезкой — для согласования с кораблями. */

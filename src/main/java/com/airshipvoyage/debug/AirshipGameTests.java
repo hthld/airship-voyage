@@ -639,7 +639,7 @@ public final class AirshipGameTests {
         ship.saveWithoutId(tag2);
         AirshipEntity copy2 = new AirshipEntity(ModEntities.AIRSHIP.get(), h.getLevel());
         copy2.load(tag2);
-        h.assertTrue(!copy2.isUnderConstruction() && copy2.hullShapes().size() == 23, "launched ship reloaded as a site");
+        h.assertTrue(!copy2.isUnderConstruction() && copy2.hullShapes().size() == 24, "launched ship reloaded as a site"); // 23 + мачта флюгера (installAll)
         ship.discard();
         h.succeed();
     }
@@ -1059,6 +1059,7 @@ public final class AirshipGameTests {
         float facing = (float) Math.toDegrees(Math.atan2(-fwd.x(), fwd.z()));
         z.moveTo(w.x(), w.y(), w.z(), facing, 0);
         h.getLevel().addFreshEntity(z);
+        z.goalSelector.removeAllGoals(g -> true); // и прогулку по кораблю (ShipStrollGoal), добавленную при входе в мир
         int[] t = {0};
         Vec3[] p0 = {null};
         int[] bumps = {0};
@@ -1079,6 +1080,51 @@ public final class AirshipGameTests {
                 ship.discard();
                 h.succeed();
             }
+        });
+    }
+
+    /**
+     * Мобы на корабле (AV-043). Корабль висит низко (настил в 2,5 м над полом — поиск пути видит пол «в пределах
+     * падения» и раньше вёл мобов прямо с палубы). Корова, овца, курица, житель и свинья 30 с: все на борту
+     * (не ниже настила и нижних балок), и хоть кто-то прогулялся по палубе дальше метра — не стоят столбом.
+     */
+    @GameTest(template = DOCK, timeoutTicks = 800, batch = "mobs")
+    public static void mobsStayAboardAndWalkAround(GameTestHelper h) {
+        Vec3 p = h.absoluteVec(new Vec3(14, 2 + 5.25 + 2.5, 14));
+        AirshipEntity ship = new AirshipEntity(ModEntities.AIRSHIP.get(), h.getLevel());
+        ship.setLayoutById(PrototypeShip.LAYOUT_ID);
+        ship.placeAt(new Vec3d(p.x, p.y, p.z), Quat.IDENTITY);
+        ship.flight().weighOff(ship.environment());
+        ship.flight().setNeutral(true); // масса мобов не должна посадить корабль на пол — проверяются мобы
+        h.getLevel().addFreshEntity(ship);
+        var types = java.util.List.of(net.minecraft.world.entity.EntityType.COW, net.minecraft.world.entity.EntityType.SHEEP,
+                net.minecraft.world.entity.EntityType.CHICKEN, net.minecraft.world.entity.EntityType.VILLAGER,
+                net.minecraft.world.entity.EntityType.PIG);
+        java.util.List<net.minecraft.world.entity.Mob> mobs = new java.util.ArrayList<>();
+        java.util.List<Vec3d> start = new java.util.ArrayList<>();
+        for (int i = 0; i < types.size(); i++) {
+            Vec3d w = ship.body().localToWorld(new Vec3d(-7 + i * 3.2, PrototypeShip.DECK_TOP + 0.3, 0));
+            var m = (net.minecraft.world.entity.Mob) types.get(i).create(h.getLevel());
+            m.moveTo(w.x(), w.y(), w.z(), 0, 0);
+            h.getLevel().addFreshEntity(m);
+            mobs.add(m);
+            start.add(new Vec3d(-7 + i * 3.2, PrototypeShip.DECK_TOP, 0));
+        }
+        h.runAfterDelay(600, () -> {
+            double moved = 0;
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < mobs.size(); i++) {
+                var m = mobs.get(i);
+                Vec3d l = ship.body().worldToLocal(new Vec3d(m.getX(), m.getY(), m.getZ()));
+                sb.append(String.format(java.util.Locale.ROOT, " %s(%.1f, %.2f, %.1f)", m.getType().toShortString(), l.x(), l.y(), l.z()));
+                h.assertTrue(l.y() > -6.05 && Math.abs(l.z()) < 6.5 && Math.abs(l.x()) < 10.5, m.getType().toShortString() + " fell off: " + l);
+                moved = Math.max(moved, Math.hypot(l.x() - start.get(i).x(), l.z() - start.get(i).z()));
+            }
+            AirshipVoyage.LOGGER.info("[test] mobs aboard after 30 s:{}; farthest walk {} m", sb, String.format("%.1f", moved));
+            h.assertTrue(moved > 1.0, "mobs just stand still on the deck");
+            mobs.forEach(net.minecraft.world.entity.Mob::discard);
+            ship.discard();
+            h.succeed();
         });
     }
 
